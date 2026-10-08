@@ -94,7 +94,17 @@ pub struct Repair {
     /// Line indices the story does not have: ids drift when a translation and
     /// a story come from different versions of a game.
     pub unmatched: Vec<usize>,
+    /// True when the text went out as UTF-8 behind a byte-order mark because
+    /// a repaired line needs characters CP932 has no room for. The original
+    /// engine would not render such a copy; this seam reads it back by the
+    /// mark, and the caller should say so.
+    pub utf8: bool,
 }
+
+/// The three bytes that mark a text block this seam wrote as UTF-8. They sit
+/// before the first line — the index starts after them — so they are never
+/// part of any string, and no CP932 file ever begins with them.
+pub const UTF8_MARK: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// A compiled story, read out of a `.dat` file.
 #[derive(Clone, Debug)]
@@ -259,19 +269,26 @@ impl Story {
             }
         }
 
+        // The text is CP932 when every line fits, exactly as the release
+        // writes it. When a repair needs characters CP932 has no room for —
+        // a translation's own words — the whole block is written as UTF-8
+        // behind a byte-order mark, so the reader never has to guess which
+        // it is looking at, and no line is ever approximated to make it fit.
+        let encoded: Option<Vec<Vec<u8>>> =
+            wanted.iter().map(|text| encode_cp932(text).ok()).collect();
+        let utf8 = encoded.is_none();
         let mut index = Vec::with_capacity(self.table.strings * 4);
         let mut block = Vec::new();
+        if utf8 {
+            block.extend_from_slice(&UTF8_MARK);
+        }
         for (line, text) in wanted.iter().enumerate() {
-            let encoded = encode_cp932(text).map_err(|refused| Error::Script {
-                context: format!("line {line} of the story"),
-                detail: format!(
-                    "the repair cannot be written: {refused}. A line this seam cannot encode is \
-                     refused rather than approximated, because the game would render the \
-                     approximation as garbage"
-                ),
-            })?;
+            let bytes = match &encoded {
+                Some(lines) => lines[line].clone(),
+                None => text.as_bytes().to_vec(),
+            };
             index.extend_from_slice(&(block.len() as u32).to_le_bytes());
-            block.extend_from_slice(&encoded);
+            block.extend_from_slice(&bytes);
             block.push(0);
         }
 
@@ -319,6 +336,7 @@ impl Story {
             bytes,
             replaced,
             unmatched,
+            utf8,
         })
     }
 }
@@ -431,12 +449,18 @@ fn find_story(bytes: &[u8], records: &[Record]) -> Result<Table> {
 }
 
 /// Whether `table`'s index describes exactly the block after it: offsets that
-/// start at zero, never go backwards, and put a NUL at every boundary.
+/// start the block — or just past its UTF-8 mark — never go backwards, and
+/// put a NUL at every boundary.
 fn fits_a_string_block(bytes: &[u8], table: &Table) -> bool {
     let end = table.block_end();
     if end > bytes.len() || table.block_len == 0 {
         return false;
     }
+    let first = if bytes[table.block_at..end].starts_with(&UTF8_MARK) {
+        UTF8_MARK.len()
+    } else {
+        0
+    };
     let mut previous: Option<usize> = None;
     for slot in 0..table.strings {
         let at = table.index_at + slot * 4;
@@ -446,8 +470,8 @@ fn fits_a_string_block(bytes: &[u8], table: &Table) -> bool {
             return false;
         }
         match previous {
-            // The first line starts the block.
-            None if offset == 0 => {}
+            // The first line starts the block, or starts past its mark.
+            None if offset == first => {}
             None => return false,
             // The line before this offset ends in the NUL immediately before
             // it, and holds none of its own; only then does the index describe
@@ -493,18 +517,34 @@ fn read_strings(bytes: &[u8], table: &Table) -> Result<Vec<String>> {
             table.block_len - 1
         };
         let raw = &bytes[table.block_at + start..table.block_at + end];
-        let (text, lossy) = decode_cp932(raw);
-        if lossy {
-            return Err(Error::Script {
+        let marked_utf8 = bytes[table.block_at..].starts_with(&UTF8_MARK);
+        let text = if marked_utf8 {
+            String::from_utf8(raw.to_vec()).map_err(|_| Error::Script {
                 context: format!("line {slot} of the story"),
                 detail: format!(
-                    "{} byte(s) at 0x{:x} are not CP932 text. A seam that cannot read a line must \
-                     not offer to rewrite the block around it, so the file is refused whole",
+                    "{} byte(s) at 0x{:x} are not UTF-8 text, but the block's own mark says they \
+                     should be. A seam that cannot read a line must not offer to rewrite the \
+                     block around it, so the file is refused whole",
                     raw.len(),
                     table.block_at + start
                 ),
-            });
-        }
+            })?
+        } else {
+            let (text, lossy) = decode_cp932(raw);
+            if lossy {
+                return Err(Error::Script {
+                    context: format!("line {slot} of the story"),
+                    detail: format!(
+                        "{} byte(s) at 0x{:x} are not CP932 text. A seam that cannot read a line \
+                         must not offer to rewrite the block around it, so the file is refused \
+                         whole",
+                        raw.len(),
+                        table.block_at + start
+                    ),
+                });
+            }
+            text
+        };
         strings.push(text);
     }
     Ok(strings)
@@ -652,18 +692,26 @@ mod tests {
     }
 
     #[test]
-    fn text_that_cannot_be_written_is_refused_and_names_the_line() {
+    fn text_cp932_cannot_carry_goes_out_as_marked_utf8() {
         let story = Story::parse(&make_bsx_dat()).expect("the fixture is a story");
-        let refused = story
+        let repair = story
             .rebuild(&replacements(&[(
                 3,
                 "an emoji is not in this character set: 😀",
             )]))
-            .expect_err("CP932 has no emoji");
-        assert!(matches!(refused, Error::Script { .. }), "{refused}");
-        let message = format!("{refused}");
-        assert!(message.contains("line 3 of the story"), "{message}");
-        assert!(message.contains('😀'), "{message}");
+            .expect("UTF-8 has room for every character");
+        assert!(repair.utf8, "the repair says which encoding it chose");
+        let reread = Story::parse(&repair.bytes).expect("the repair parses back");
+        assert_eq!(
+            reread.strings[3],
+            "an emoji is not in this character set: 😀"
+        );
+        // A repair that fits CP932 stays CP932, byte for byte the release's way.
+        let plain = story
+            .rebuild(&replacements(&[(3, "an ordinary line")]))
+            .expect("CP932 carries this");
+        assert!(!plain.utf8);
+        assert!(!plain.bytes.windows(3).any(|w| w == UTF8_MARK));
     }
 
     #[test]

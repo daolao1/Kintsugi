@@ -204,9 +204,19 @@ pub struct WrittenScript {
     /// script and the translation come from different versions, and a silent
     /// mismatch here is how a patch lands on the wrong line.
     pub unmatched: Vec<usize>,
+    /// Anything the seam had to decide the caller should repeat out loud —
+    /// the same honesty rule as a mount's warnings, carried with the repair
+    /// so an install can say it.
+    pub notes: Vec<String>,
 }
 
 impl WrittenScript {
+    /// Attach a note the caller should repeat when it reports the repair.
+    pub fn noting(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
     /// The common case: a script that is a file of its own, so the repair is
     /// one file and the script's bytes are that file's bytes.
     pub fn loose(
@@ -223,6 +233,7 @@ impl WrittenScript {
             script,
             replaced,
             unmatched,
+            notes: Vec::new(),
         }
     }
 
@@ -239,6 +250,7 @@ impl WrittenScript {
             files,
             replaced,
             unmatched,
+            notes: Vec::new(),
         }
     }
 

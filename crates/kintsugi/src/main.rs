@@ -615,6 +615,7 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
             changed,
             total: original.commands.len(),
             unmatched: written.unmatched.clone(),
+            repair_notes: written.notes.clone(),
             originals: originals_after.len(),
             copy: into.clone(),
         })
@@ -635,6 +636,7 @@ struct Installed {
     changed: usize,
     total: usize,
     unmatched: Vec<usize>,
+    repair_notes: Vec<String>,
     originals: usize,
     copy: PathBuf,
 }
@@ -655,6 +657,9 @@ impl Installed {
             self.changed,
             self.total
         );
+        for note in &self.repair_notes {
+            println!("{}", dim(format!("  · {note}")));
+        }
         if !self.unmatched.is_empty() {
             let ids: Vec<String> = self
                 .unmatched

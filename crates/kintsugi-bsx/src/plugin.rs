@@ -512,12 +512,18 @@ impl EngineMount for BsxMount {
         missing.extend(repair.unmatched.iter().copied());
         missing.sort_unstable();
         missing.dedup();
-        Ok(WrittenScript::loose(
-            path.clone(),
-            repair.bytes,
-            repair.replaced,
-            missing,
-        ))
+        let written = WrittenScript::loose(path.clone(), repair.bytes, repair.replaced, missing);
+        let written = if repair.utf8 {
+            written.noting(
+                "the text is written as UTF-8 behind a byte-order mark, because the repair needs \
+                 characters CP932 has no room for — the words are exact, nothing was approximated \
+                 to fit; kintsugi reads the copy back by the mark, and the original engine would \
+                 not render its text",
+            )
+        } else {
+            written
+        };
+        Ok(written)
     }
 }
 
@@ -533,6 +539,10 @@ struct Plan {
     text: Vec<(usize, usize)>,
     warnings: Vec<String>,
 }
+
+/// The stems a walk asked for that no rule could choose between, shared with
+/// the resolver so the count is about the game's resources and nothing else.
+type AmbiguousStems = std::rc::Rc<std::cell::RefCell<BTreeSet<String>>>;
 
 impl BsxMount {
     /// The one walk of a story both reading and repairing trust: the stage
@@ -550,8 +560,9 @@ impl BsxMount {
     fn plan_staged(&self, story: &Story) -> Option<Plan> {
         let programs = crate::stage::programs(story)?;
         let names = crate::stage::resources(story).unwrap_or_default();
-        let (resolver, collisions) = self.resource_resolver();
+        let (resolver, ambiguous) = self.resource_resolver();
         let emission = crate::stage::emit(story, &programs, &names, &resolver);
+        let collisions = ambiguous.borrow().len();
 
         let count =
             |pick: fn(&Command) -> bool| emission.commands.iter().filter(|c| pick(c)).count();
@@ -669,7 +680,11 @@ impl BsxMount {
     /// name that matches nothing resolves to nothing, and a name that matches
     /// two files resolves to the engine's own format when only one of them is
     /// in it — otherwise to nothing. A guess is not a repair.
-    fn resource_resolver(&self) -> (impl Fn(&str) -> Option<String>, usize) {
+    /// Resource names resolve by stem against every file the mount can see.
+    /// A stem the code never names is nobody's business — an ISO sitting
+    /// next to its own .mds twin is not a collision — so only stems a walk
+    /// actually asked for are counted when no rule can choose between them.
+    fn resource_resolver(&self) -> (impl Fn(&str) -> Option<String>, AmbiguousStems) {
         let mut by_stem: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (path, _size) in self.vfs.list() {
             let name = path.to_string();
@@ -681,9 +696,10 @@ impl BsxMount {
             };
             by_stem.entry(stem.to_lowercase()).or_default().push(name);
         }
-        let mut resolved: BTreeMap<String, String> = BTreeMap::new();
-        let mut collisions = 0usize;
-        for (stem, paths) in by_stem {
+        let ambiguous = AmbiguousStems::default();
+        let asked = ambiguous.clone();
+        let resolver = move |name: &str| {
+            let paths = by_stem.get(&name.to_lowercase())?;
             let chosen = match paths.as_slice() {
                 [only] => Some(only.clone()),
                 many => {
@@ -697,16 +713,11 @@ impl BsxMount {
                     }
                 }
             };
-            match chosen {
-                Some(path) => {
-                    resolved.insert(stem, path);
-                }
-                None => collisions += 1,
+            if chosen.is_none() {
+                asked.borrow_mut().insert(name.to_lowercase());
             }
-        }
-        (
-            move |name: &str| resolved.get(&name.to_lowercase()).cloned(),
-            collisions,
-        )
+            chosen
+        };
+        (resolver, ambiguous)
     }
 }
