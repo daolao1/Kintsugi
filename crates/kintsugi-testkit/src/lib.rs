@@ -236,6 +236,45 @@ fn assert_fixture_is_recognized(plugin: &dyn EnginePlugin, fixture: &SeamFixture
         fixture.name
     );
 
+    for extension in mount.image_extensions() {
+        assert!(
+            !extension.starts_with('.') && extension == &extension.to_ascii_lowercase(),
+            "seam '{id}' lists image extension '{extension}': list bare, lower-case \
+             extensions, because that is the form a path is compared in"
+        );
+    }
+
+    // Rule 5: a seam that names the game's script must be able to hand it over.
+    // Naming one the mount does not have, or naming a different file than the
+    // one script a fixture declares, is how a command repairs the wrong script
+    // and reports the name it chose afterwards.
+    if let Ok(named) = mount.primary_script() {
+        assert!(
+            mount.vfs().exists(&named),
+            "seam '{id}' names '{named}' as the game's script, but the mount of its own \
+             fixture '{}' has no such file: a name the seam cannot follow through on \
+             sends `translate` and `install` at nothing",
+            fixture.name
+        );
+        mount.read_script(&named).unwrap_or_else(|e| {
+            panic!(
+                "seam '{id}' names '{named}' as the game's script and cannot read it out \
+                 of its own mount: {e}"
+            )
+        });
+        if let Some(script_path) = fixture.script {
+            let declared = kintsugi_core::vfs::VirtualPath::new(script_path);
+            assert_eq!(
+                named, declared,
+                "seam '{id}' names '{named}' as the game's script, but '{}' is the only \
+                 script in this fixture: a game with one script has one main script, and \
+                 choosing another one is a repair aimed at the wrong file",
+                fixture.name
+            );
+        }
+    }
+    // Refusing is a supported answer — see `EngineMount::primary_script`.
+
     if let Some(script_path) = fixture.script {
         let path = kintsugi_core::vfs::VirtualPath::new(script_path);
         let script = mount.read_script(&path).unwrap_or_else(|e| {
@@ -249,7 +288,7 @@ fn assert_fixture_is_recognized(plugin: &dyn EnginePlugin, fixture: &SeamFixture
             "seam '{id}' read '{script_path}' into an empty script",
         );
 
-        // Rule 5: changing nothing must change nothing.
+        // Rule 6: changing nothing must change nothing.
         let original_script_bytes = mount.vfs().read(&path).unwrap_or_else(|e| {
             panic!("seam '{id}' read '{script_path}' but the mount has no such file: {e}")
         });
@@ -342,6 +381,10 @@ mod tests {
         ReformatsWhenUntouched,
         /// Does not recognize its own format.
         UnrecognizedFixture,
+        /// Names a script its own game does not have.
+        PrimaryScriptMissing,
+        /// Names some script other than the game's only one.
+        PrimaryScriptIsAnother,
     }
 
     struct ToyPlugin(Flaw);
@@ -374,6 +417,14 @@ mod tests {
 
         fn vfs(&self) -> &Vfs {
             &self.vfs
+        }
+
+        fn primary_script(&self) -> Result<VirtualPath> {
+            match self.flaw {
+                Flaw::PrimaryScriptMissing => Ok(VirtualPath::new("nowhere.toy")),
+                Flaw::PrimaryScriptIsAnother => Ok(VirtualPath::new("extra.toy")),
+                _ => Ok(VirtualPath::new("story.toy")),
+            }
         }
 
         fn read_script(&self, path: &VirtualPath) -> Result<Script> {
@@ -486,6 +537,35 @@ mod tests {
     #[test]
     fn a_conforming_seam_passes() {
         assert_seam_contract(&ToyPlugin(Flaw::None), &[toy_fixture()]);
+    }
+
+    #[test]
+    fn a_seam_that_names_a_script_it_does_not_have_is_caught() {
+        let failure = std::panic::catch_unwind(|| {
+            assert_seam_contract(&ToyPlugin(Flaw::PrimaryScriptMissing), &[toy_fixture()]);
+        })
+        .unwrap_err();
+        let message = panic_message(&failure);
+        assert!(
+            message.contains("nowhere.toy") && message.contains("has no such file"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_seam_that_names_another_script_is_caught() {
+        // Two scripts on disk, one of them declared: naming the other one is a
+        // repair aimed at the wrong file.
+        let fixture = toy_fixture().file("extra.toy", b"TOY1not the one\n".to_vec());
+        let failure = std::panic::catch_unwind(|| {
+            assert_seam_contract(&ToyPlugin(Flaw::PrimaryScriptIsAnother), &[fixture]);
+        })
+        .unwrap_err();
+        let message = panic_message(&failure);
+        assert!(
+            message.contains("extra.toy") && message.contains("one main script"),
+            "{message}"
+        );
     }
 
     #[test]

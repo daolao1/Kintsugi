@@ -109,7 +109,17 @@ Scriptable behaviour, so a repair can run inside make/CI:
 | --- | --- |
 | `0` | the repair was done, or help was asked for (`kintsugi`, `help`, `--help`, `-h`) |
 | `1` | the engine refused (unreadable file, unmappable text, no such asset, a factor past what the input can bear) |
-| `2` | the command line was wrong (unknown command, unknown flag, missing directory, a flag value that is not what it claims, or a request the tool refuses to carry out) |
+| `2` | the command line was wrong (unknown command, unknown flag, a flag *this* command does not use, missing directory, a flag value that is not what it claims, or a request the tool refuses to carry out) |
+
+`--help` (and `-h`) wins wherever it appears, including after a command, so
+`kintsugi translate --help` prints usage and exits `0` rather than complaining
+about the missing game directory: the user asked a question, and it is answered.
+Flags are per-command: `kintsugi detect --factor 4` exits `2` naming the flag
+and the command instead of accepting it and quietly ignoring it, which is how
+`translate --as omake.bdt` used to translate `story.bdt` while both commands
+looked happy. The table of what each command accepts lives in
+`Args::ACCEPTED` (`crates/kintsugi/src/main.rs`), and a unit test holds the
+help text to it in both directions.
 
 Usage errors are separated from engine errors on purpose: `--faktur 4` should
 not look like a broken game file. This was written down before it was true —

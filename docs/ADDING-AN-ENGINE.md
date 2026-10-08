@@ -206,6 +206,26 @@ pub fn plugin() -> ExamplePlugin { ExamplePlugin }
 support. Leave the rest out: the defaults refuse with your engine's name
 attached, which is exactly the behaviour you want.
 
+Two of the small ones are worth implementing even though they look like
+conveniences, because they are how the *host* stays ignorant of your engine:
+
+```rust
+fn primary_script(&self) -> Result<VirtualPath> {
+    // Which script a game is played through is your engine's convention, and
+    // it belongs here rather than in the CLI. Refusing is fine — a game with
+    // several scripts and no obvious main one is a question for the person
+    // holding the game, and `--as` is how they answer it — but if you do
+    // answer, name a script your own mount can hand back.
+    Ok(VirtualPath::new("story.bdt"))
+}
+
+fn image_extensions(&self) -> &'static [&'static str] {
+    // What `read_image` really decodes, bare and lower-case. The host lists
+    // and picks pictures from this, so a wrong entry shows up as a refusal.
+    &["zbm", "bbm"]
+}
+```
+
 If you implement `write_script`, follow the BlueGale rule — **change only the
 lines named in `replacements`, and preserve every other byte**. A patch that
 silently reformats a game is worse than no patch. `bdt::rewrite_bdt` shows the
@@ -281,7 +301,12 @@ game. The checker then insists, with a message that says what to do:
 3. a seam **names itself** — every verdict and every mount must carry the id
    from `metadata()`, because that id is what a user sees attached to a repair;
 4. an **empty folder is nobody's game** — no verdict at `Possible` or better;
-5. **changing nothing changes nothing** — `write_script` with an empty
+5. **a named script exists** — if `primary_script` answers, the named file must
+   be in a mount of the seam's own game, `read_script` must be able to read it,
+   and if the fixture declares one script, that is the one it must name. A seam
+   whose choice is wrong sends `translate` and `install` at the wrong file while
+   reporting a name;
+6. **changing nothing changes nothing** — `write_script` with an empty
    replacement map must return the script's own bytes *and* every file it claims
    to change byte-for-byte, or refuse. This is §2 of
    [ARCHITECTURE.md](../ARCHITECTURE.md) applied to your writer, and it is the
@@ -289,8 +314,9 @@ game. The checker then insists, with a message that says what to do:
    to touch — a container seam fails it twice over if its index does not come
    back identical.
 
+
 The checker is itself tested against deliberately broken seams
-(`crates/kintsugi-testkit/src/lib.rs`, eight of them), because a contract check
+(`crates/kintsugi-testkit/src/lib.rs`, ten of them), because a contract check
 that cannot fail is decoration.
 
 Then test the seam the way a user would use it:

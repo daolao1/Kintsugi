@@ -564,8 +564,6 @@ mod install {
         );
     }
 
-    /// A script served from an archive cannot be repaired by writing a file
-    /// beside it: the archive shadows loose files, so the copy would look
     /// A game whose script lives inside its archive: the repair goes back into
     /// the archive, which means two files change — the blob and the index that
     /// points into it — and the copy plays the translation.
@@ -973,6 +971,229 @@ mod install {
         assert!(
             !temp.0.join("copy-a").exists(),
             "a usage error must not leave a folder behind"
+        );
+    }
+
+    /// The script a command works on: the one the engine names, or the one the
+    /// user names — the host knows neither an engine's file names nor its
+    /// extensions.
+    #[test]
+    fn the_script_is_the_engines_choice_or_the_users() {
+        let temp = TempDir::new("script-choice");
+        let (game, _) = game_and_patch(&temp, "choice");
+        // A second script, much shorter, so which one was translated shows up
+        // in the patch rather than in the wording of a log line.
+        let omake = kintsugi_bluegale::fixtures::make_bdt("$start\r\nおまけです。\r\n%fin\r\n");
+        fs::write(game.join("omake.bdt"), &omake).unwrap();
+        let out = |name: &str| temp.0.join(name).to_string_lossy().into_owned();
+
+        // Named with `--as`, which is `install`'s spelling of the same thing.
+        let named = run(&[
+            "translate",
+            game.to_str().unwrap(),
+            "--mock",
+            "--no-play",
+            "--as",
+            "omake.bdt",
+            "--write-script",
+            &out("as.bdt"),
+        ]);
+        assert_eq!(
+            named.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&named),
+            stderr(&named)
+        );
+        let via_as = kintsugi_bluegale::bdt::parse_bdt("as.bdt", &fs::read(out("as.bdt")).unwrap())
+            .expect("the patch must be a script");
+        assert_eq!(
+            via_as.commands.len(),
+            3,
+            "`--as omake.bdt` did not translate omake.bdt"
+        );
+
+        // `--script` is the same flag here, and must produce the same bytes.
+        let via_script = run(&[
+            "translate",
+            game.to_str().unwrap(),
+            "--mock",
+            "--no-play",
+            "--script",
+            "omake.bdt",
+            "--write-script",
+            &out("script.bdt"),
+        ]);
+        assert_eq!(via_script.status.code(), Some(0));
+        assert_eq!(
+            fs::read(out("as.bdt")).unwrap(),
+            fs::read(out("script.bdt")).unwrap(),
+            "--as and --script disagree about which script to translate"
+        );
+
+        // With neither, the seam names the game's script: story.bdt, which is
+        // the long one.
+        let default = run(&[
+            "translate",
+            game.to_str().unwrap(),
+            "--mock",
+            "--no-play",
+            "--write-script",
+            &out("default.bdt"),
+        ]);
+        assert_eq!(default.status.code(), Some(0));
+        let chosen = kintsugi_bluegale::bdt::parse_bdt(
+            "default.bdt",
+            &fs::read(out("default.bdt")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            chosen.commands.len() > 3,
+            "the seam's own choice was not the game's main script: {} commands",
+            chosen.commands.len()
+        );
+    }
+
+    /// Several scripts and no main one: a question only the person holding the
+    /// game can settle, so the answer is a refusal that names them — not a
+    /// heuristic that picks one and reports which *after* translating it.
+    #[test]
+    fn several_scripts_and_no_main_one_is_refused_with_the_list() {
+        let temp = TempDir::new("script-ambiguous");
+        let (game, _) = game_and_patch(&temp, "ambiguous");
+        fs::rename(game.join("story.bdt"), game.join("main_scenario.bdt")).unwrap();
+        fs::write(
+            game.join("omake.bdt"),
+            kintsugi_bluegale::fixtures::make_bdt("$start\r\nおまけです。\r\n%fin\r\n"),
+        )
+        .unwrap();
+
+        let output = run(&["translate", game.to_str().unwrap(), "--mock", "--no-play"]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        let message = stderr(&output);
+        assert!(
+            message.contains("main_scenario.bdt")
+                && message.contains("omake.bdt")
+                && message.contains("none of them is story.bdt"),
+            "the refusal must list what it found: {message}"
+        );
+
+        // And naming one gets on with it.
+        let named = run(&[
+            "translate",
+            game.to_str().unwrap(),
+            "--mock",
+            "--no-play",
+            "--script",
+            "omake.bdt",
+        ]);
+        assert_eq!(named.status.code(), Some(0), "stderr: {}", stderr(&named));
+    }
+
+    /// Asking for help gets help, wherever in the line it appears: a user who
+    /// typed `--help` asked a question, and answering "missing game directory"
+    /// is answering a different one.
+    #[test]
+    fn asking_for_help_gets_help() {
+        for args in [
+            vec!["--help"],
+            vec!["help"],
+            vec!["translate", "--help"],
+            vec!["install", "some-game", "-h"],
+            vec!["upscale", "some-game", "--help"],
+        ] {
+            let output = run(&args);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "`{}` exited {}; stderr: {}",
+                args.join(" "),
+                output.status.code().unwrap_or(-1),
+                stderr(&output)
+            );
+            assert!(
+                stdout(&output).contains("Usage:"),
+                "`{}` did not print usage: {}",
+                args.join(" "),
+                stdout(&output)
+            );
+        }
+        // `--version` is the same kind of question, and takes no game folder.
+        let version = run(&["install", "--version"]);
+        assert_eq!(version.status.code(), Some(0));
+        assert!(stdout(&version).starts_with("kintsugi "));
+    }
+
+    /// A flag a command does not use is a mistake, not something to ignore:
+    /// `translate --as` used to be accepted and silently dropped, which is how
+    /// a user translates one script and repairs another.
+    #[test]
+    fn a_flag_the_command_does_not_use_is_a_usage_error() {
+        let temp = TempDir::new("flag-scope");
+        let (game, _) = game_and_patch(&temp, "scope");
+
+        for (args, flag) in [
+            (
+                vec!["detect", game.to_str().unwrap(), "--factor", "4"],
+                "--factor",
+            ),
+            (
+                vec!["detect", game.to_str().unwrap(), "--as", "story.bdt"],
+                "--as",
+            ),
+            (
+                vec![
+                    "translate",
+                    game.to_str().unwrap(),
+                    "--into",
+                    "/tmp/nowhere",
+                ],
+                "--into",
+            ),
+            (
+                vec!["play", game.to_str().unwrap(), "--method", "anime4k"],
+                "--method",
+            ),
+        ] {
+            let output = run(&args);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "`{}` exited {} instead of 2; stderr: {}",
+                args.join(" "),
+                output.status.code().unwrap_or(-1),
+                stderr(&output)
+            );
+            let message = stderr(&output);
+            assert!(
+                message.contains(&format!("{flag} is not a flag of")) && message.contains(args[0]),
+                "the refusal must name the command and the flag: {message}"
+            );
+        }
+
+        // The same flags still work where they mean something.
+        let ok = run(&[
+            "upscale",
+            game.to_str().unwrap(),
+            "--method",
+            "nearest",
+            "--factor",
+            "2",
+            "-o",
+            temp.0.join("up.png").to_str().unwrap(),
+        ]);
+        assert_eq!(
+            ok.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&ok),
+            stderr(&ok)
         );
     }
 }

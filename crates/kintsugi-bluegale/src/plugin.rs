@@ -306,6 +306,43 @@ impl EngineMount for BluegaleMount {
     /// This seam never touches the disk: it returns bytes, and the host
     /// decides where they go. A seam that could write would be a seam that
     /// could break the fan's original.
+    fn primary_script(&self) -> Result<VirtualPath> {
+        // `story.bdt` is this engine's convention for the script a game is
+        // played through, and it is the only name this seam will guess. A game
+        // with several scripts and none of them called that is a question for
+        // the person holding the game, not for a heuristic: the report would
+        // otherwise name the script it chose *after* translating the wrong one.
+        let candidates = self.vfs.find_by_extension(&["bdt"]);
+        if let Some(path) = candidates.iter().find(|p| p.as_str() == "story.bdt") {
+            return Ok(path.clone());
+        }
+        if candidates.len() == 1 {
+            return Ok(candidates[0].clone());
+        }
+        Err(Error::unsupported(
+            "BlueGale",
+            match candidates.len() {
+                0 => "this game has no .bdt script to repair".to_string(),
+                n => format!(
+                    "this game has {n} .bdt scripts ({}) and none of them is story.bdt, \
+                     which is the only one this seam picks on its own. Name the script \
+                     you want",
+                    candidates
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+        ))
+    }
+
+    fn image_extensions(&self) -> &'static [&'static str] {
+        // What `read_image` decodes: two obfuscated formats, and a loose bitmap
+        // that travels with some releases.
+        &["zbm", "bbm", "bmp"]
+    }
+
     fn write_script(
         &self,
         path: &VirtualPath,

@@ -66,6 +66,18 @@ fn main() {
 }
 
 fn run(args: &[String]) -> std::result::Result<(), Failure> {
+    // `kintsugi translate --help` asked for help, and answering "missing game
+    // directory" is answering a question nobody asked. Asking for help wins
+    // over doing the work, wherever in the line it appears.
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage();
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("kintsugi {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     match args.first().map(String::as_str) {
         Some("demo") => cmd_demo(&args[1..]),
         Some("detect") => cmd_detect(&args[1..]),
@@ -91,9 +103,10 @@ fn run(args: &[String]) -> std::result::Result<(), Failure> {
         }
         Some(other) => {
             eprint!("{}", usage_text());
+            let commands: Vec<&str> = Args::ACCEPTED.iter().map(|(name, _, _)| *name).collect();
             Err(Failure::Usage(format!(
-                "unknown command '{other}'; the commands are demo, detect, inspect, \
-                 play, upscale, interpolate, translate, version"
+                "unknown command '{other}'; the commands are {}",
+                commands.join(", ")
             )))
         }
     }
@@ -148,6 +161,57 @@ impl Args {
     const BOOL_FLAGS: &'static [&'static str] =
         &["auto", "mock", "no-play", "only-typed", "help", "version"];
 
+    /// Which flags each command actually uses: `(command, values, booleans)`.
+    ///
+    /// A flag a command does not use is a mistake, not something to ignore.
+    /// `translate --as omake.bdt` used to be accepted and silently dropped —
+    /// the flag is `install`'s spelling — which is how a user translates one
+    /// script and repairs another while both commands look happy. `--help` and
+    /// `--version` are accepted everywhere.
+    ///
+    /// `help_text_matches_this_table` holds the hand-written help to this list,
+    /// so the two cannot drift apart.
+    const ACCEPTED: &'static [(
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    )] = &[
+        ("demo", &["dir"], &["auto", "no-play"]),
+        ("detect", &[], &[]),
+        ("inspect", &["script", "as"], &[]),
+        ("play", &["as", "script"], &["auto"]),
+        ("upscale", &["asset", "method", "factor", "output"], &[]),
+        ("interpolate", &["asset", "factor", "output"], &[]),
+        (
+            "translate",
+            &[
+                "as",
+                "script",
+                "source",
+                "target",
+                "glossary",
+                "jsonl-dir",
+                "write-script",
+                "api-base",
+                "api-key",
+                "model",
+            ],
+            &["mock", "only-typed", "no-play", "auto"],
+        ),
+        ("install", &["as", "script", "into"], &[]),
+        ("version", &[], &[]),
+        ("help", &[], &[]),
+    ];
+
+    /// Flags that name the thing this command works on, so a command can accept
+    /// either spelling without accepting a flag it ignores.
+    fn accepted(command: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+        Self::ACCEPTED
+            .iter()
+            .find(|(name, _, _)| *name == command)
+            .map(|(_, values, bools)| (*values, *bools))
+    }
+
     /// Expand the short spellings this CLI documents.
     fn canonical(name: &str) -> &str {
         match name {
@@ -158,7 +222,7 @@ impl Args {
         }
     }
 
-    fn parse(args: &[String]) -> std::result::Result<Self, String> {
+    fn parse(command: &str, args: &[String]) -> std::result::Result<Self, String> {
         let mut out = Self {
             positional: Vec::new(),
             flags: HashMap::new(),
@@ -182,13 +246,29 @@ impl Args {
                 continue;
             };
             let name = Self::canonical(name);
+            let (values, bools) =
+                Self::accepted(command).ok_or_else(|| format!("unknown command '{command}'"))?;
+            let accepted_here = name == "help"
+                || name == "version"
+                || values.contains(&name)
+                || bools.contains(&name);
             if Self::VALUE_FLAGS.contains(&name) {
+                if !accepted_here {
+                    return Err(format!(
+                        "--{name} is not a flag of `kintsugi {command}` (try: kintsugi --help)"
+                    ));
+                }
                 let Some(value) = args.get(i + 1) else {
                     return Err(format!("--{name} needs a value"));
                 };
                 out.flags.insert(name.to_string(), value.clone());
                 i += 2;
             } else if Self::BOOL_FLAGS.contains(&name) {
+                if !accepted_here {
+                    return Err(format!(
+                        "--{name} is not a flag of `kintsugi {command}` (try: kintsugi --help)"
+                    ));
+                }
                 out.bools.insert(name.to_string());
                 i += 1;
             } else {
@@ -274,7 +354,7 @@ fn parse_factor(text: &str, max: u32) -> std::result::Result<u32, Failure> {
 ///   parsed again, and the number of changed lines is compared with the number
 ///   of replacements. If they disagree, the install failed and says so.
 fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("install", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let Some(patch_arg) = args.flag("script") else {
         return Err(Failure::Usage(
@@ -298,6 +378,9 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     let registry = registry();
     let original_vfs = open_game(dir)?;
     let (_, original_mount) = registry.mount_best(&original_vfs)?;
+    // `--as` names the script inside the game; `--script` here is the patch,
+    // which is a different thing with a confusingly similar name. Naming the
+    // game's script is optional — the seam picks when it can.
     let target = pick_script(original_mount.as_ref(), args.flag("as"))?;
 
     // The script may be a file in the game folder or an entry inside one of its
@@ -1233,24 +1316,49 @@ fn print_verdicts(vfs: &Vfs) -> Result<Vec<(usize, kintsugi_core::detect::Detect
 
 /// Pick a script to play: `preferred` if given, else `story.bdt`, else the
 /// first script-ish file the mounted game exposes.
-fn pick_script(mount: &dyn EngineMount, preferred: Option<&str>) -> Result<VirtualPath> {
-    if let Some(name) = preferred {
-        let path = VirtualPath::new(name);
-        if mount.vfs().exists(&path) {
-            return Ok(path);
+/// The script a command works on: the one the user named, or the one the seam
+/// calls the game's.
+///
+/// Naming one is checked against the mounted view, so a typo is a `not found`
+/// that quotes the name back instead of a repair aimed at nothing. Otherwise
+/// the *seam* answers, because which file is a game's script is engine
+/// knowledge: the host does not know that BlueGale's is called `story.bdt`, or
+/// that scripts have an extension at all. A seam that will not choose (a game
+/// with several scripts and no obvious main one) refuses, and the user names
+/// one — the alternative is picking one silently and reporting which *after*
+/// translating it.
+fn pick_script(mount: &dyn EngineMount, named: Option<&str>) -> Result<VirtualPath> {
+    match named {
+        Some(name) => {
+            let path = VirtualPath::new(name);
+            if mount.vfs().exists(&path) {
+                Ok(path)
+            } else {
+                Err(Error::NotFound(format!(
+                    "script '{name}' not found in the game"
+                )))
+            }
         }
-        return Err(Error::NotFound(format!(
-            "script '{name}' not found in the game"
-        )));
+        None => mount.primary_script(),
     }
-    let candidates = mount.vfs().find_by_extension(&["bdt"]);
-    if let Some(path) = candidates.iter().find(|p| p.as_str() == "story.bdt") {
-        return Ok(path.clone());
+}
+
+/// The images a command works on when the user did not name one: every file in
+/// the game carrying an extension the *seam* says it can decode, in name order
+/// so a frame sequence comes out in the order it was drawn.
+fn discover_images(mount: &dyn EngineMount) -> Vec<String> {
+    let extensions = mount.image_extensions();
+    if extensions.is_empty() {
+        return Vec::new();
     }
-    candidates
-        .first()
-        .cloned()
-        .ok_or_else(|| Error::unsupported("play", "no .bdt script found in this game"))
+    let mut found: Vec<String> = mount
+        .vfs()
+        .find_by_extension(extensions)
+        .iter()
+        .map(|path| path.to_string())
+        .collect();
+    found.sort();
+    found
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,7 +1366,7 @@ fn pick_script(mount: &dyn EngineMount, preferred: Option<&str>) -> Result<Virtu
 // ---------------------------------------------------------------------------
 
 fn cmd_demo(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("demo", args).map_err(Failure::Usage)?;
     let dir = args.flag_or("dir", "demo-game");
 
     println!("{}", gold("🏺 Kintsugi — 金缮引擎 · demo"));
@@ -1301,7 +1409,13 @@ fn cmd_demo(args: &[String]) -> std::result::Result<(), Failure> {
     println!("{}", gold("glazing (upscaling) the title screen…"));
     let registry = registry();
     let (_, mount) = registry.mount_best(&vfs)?;
-    let title = mount.read_image(&VirtualPath::new("title.bbm"))?;
+    let title_path = VirtualPath::new(
+        discover_images(mount.as_ref())
+            .first()
+            .map(String::as_str)
+            .unwrap_or("title.bbm"),
+    );
+    let title = mount.read_image(&title_path)?;
     let upscaled = upscale(&title, 4, UpscaleMethod::Anime4K)?;
     let png = encode_png(&upscaled)?;
     let out = target.join("title-x4-anime4k.png");
@@ -1323,7 +1437,7 @@ fn cmd_demo(args: &[String]) -> std::result::Result<(), Failure> {
 }
 
 fn cmd_detect(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("detect", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
     print_verdicts(&vfs)?;
@@ -1331,7 +1445,7 @@ fn cmd_detect(args: &[String]) -> std::result::Result<(), Failure> {
 }
 
 fn cmd_inspect(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("inspect", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
 
@@ -1361,7 +1475,7 @@ fn cmd_inspect(args: &[String]) -> std::result::Result<(), Failure> {
     println!();
 
     println!("{}", gold("script preview"));
-    if let Ok(script_path) = pick_script(mount.as_ref(), args.flag("script")) {
+    if let Ok(script_path) = pick_script(mount.as_ref(), args.flag("script").or(args.flag("as"))) {
         let script = mount.read_script(&script_path)?;
         println!("  {} {}", dim("source:"), script.source);
         if !script.warnings.is_empty() {
@@ -1401,7 +1515,7 @@ fn preview(command: &Command) -> String {
 }
 
 fn cmd_play(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("play", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
 
@@ -1410,7 +1524,7 @@ fn cmd_play(args: &[String]) -> std::result::Result<(), Failure> {
     for note in &mount.info().notes {
         println!("{}", dim(format!("  [mount] {note}")));
     }
-    let script_path = pick_script(mount.as_ref(), args.flag("script"))?;
+    let script_path = pick_script(mount.as_ref(), args.flag("script").or(args.flag("as")))?;
     let script = mount.read_script(&script_path)?;
     for warning in &script.warnings {
         println!("{}", dim(format!("  [warn] {warning}")));
@@ -1421,7 +1535,7 @@ fn cmd_play(args: &[String]) -> std::result::Result<(), Failure> {
 }
 
 fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("upscale", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
     // Both of these are the command line being wrong, not the game being
@@ -1448,8 +1562,16 @@ fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
     let asset = match args.flag("asset").or_else(|| args.position(1)) {
         Some(asset) => asset.to_string(),
         None => {
+            let found = discover_images(mount.as_ref());
+            if found.is_empty() {
+                println!(
+                    "{}",
+                    dim("this game has no image this seam claims to decode")
+                );
+                return Ok(());
+            }
             println!("{}", gold("image assets in this game"));
-            for path in mount.vfs().find_by_extension(&["zbm", "bbm", "bmp"]) {
+            for path in &found {
                 println!("  {} {}", dim("·"), path);
             }
             return Ok(());
@@ -1478,7 +1600,7 @@ fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
 }
 
 fn cmd_interpolate(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("interpolate", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
     // Only zero is wrong on its face here. The interpolator has no fixed
@@ -1498,13 +1620,7 @@ fn cmd_interpolate(args: &[String]) -> std::result::Result<(), Failure> {
     if let Some(pattern) = args.flag("asset") {
         candidates.push(pattern.to_string());
     } else {
-        candidates = mount
-            .vfs()
-            .find_by_extension(&["zbm", "bbm", "bmp"])
-            .iter()
-            .map(|path| path.to_string())
-            .collect();
-        candidates.sort();
+        candidates = discover_images(mount.as_ref());
     }
     if candidates.is_empty() {
         return Err(Failure::Engine(Error::unsupported(
@@ -1592,7 +1708,7 @@ fn cmd_interpolate(args: &[String]) -> std::result::Result<(), Failure> {
 }
 
 fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
-    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let args = Args::parse("translate", args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let source_lang = args.flag_or("source", "ja");
     let target_lang = args.flag_or("target", "en");
@@ -1600,7 +1716,7 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
 
     let registry = registry();
     let (_, mount) = registry.mount_best(&vfs)?;
-    let script_path = pick_script(mount.as_ref(), args.flag("script"))?;
+    let script_path = pick_script(mount.as_ref(), args.flag("script").or(args.flag("as")))?;
     let script = mount.read_script(&script_path)?;
 
     let entries = if args.on("only-typed") {
@@ -1906,6 +2022,10 @@ fn usage_text() -> String {
     line(&mut text, "  kintsugi inspect <DIR> [--script PATH]");
     line(
         &mut text,
+        "        --script, or --as, picks the script to preview.",
+    );
+    line(
+        &mut text,
         "        Detection verdicts, mounted archives, files, script preview.",
     );
     line(&mut text, "");
@@ -1918,6 +2038,18 @@ fn usage_text() -> String {
         &mut text,
         "        terminal. --auto answers choices with the first option.",
     );
+    line(
+        &mut text,
+        "        --script and --as name the same thing. With neither, the",
+    );
+    line(
+        &mut text,
+        "        engine's main script is used; a game with several scripts",
+    );
+    line(
+        &mut text,
+        "        and no obvious main one is a question only you can settle.",
+    );
     line(&mut text, "");
     line(
         &mut text,
@@ -1929,14 +2061,21 @@ fn usage_text() -> String {
     );
     line(
         &mut text,
-        "        bilinear | nearest. No ASSET lists candidates.",
+        "        bilinear | nearest. ASSET and --asset NAME are the same",
     );
+    line(
+        &mut text,
+        "        thing; with neither, the candidates are listed. -o and",
+    );
+    line(&mut text, "        --output name the same file.");
     line(&mut text, "");
     line(
         &mut text,
-        "  kintsugi interpolate <DIR> [--factor N] [-o DIR]
+        "  kintsugi interpolate <DIR> [--asset NAME] [--factor N] [-o DIR]
         Fill the gaps between an image sequence's frames (插帧):
-        blend | ... . Factor 2 turns N frames into 2N-1.
+        blend | ... . Factor 2 turns N frames into 2N-1. Frames are
+        every image the engine decodes, in name order, unless
+        --asset names one.
 
   kintsugi translate <DIR> [options]",
     );
@@ -1946,7 +2085,8 @@ fn usage_text() -> String {
     );
     line(
         &mut text,
-        "          --script PATH        script to translate (default: story.bdt)",
+        "          --script PATH        script to translate, or --as PATH (the same
+                               thing). Default: the engine's main script",
     );
     line(&mut text, "          --source ja --target en");
     line(
@@ -2024,4 +2164,72 @@ The originals are never modified. All repairs stay visible. 以金缮之艺，�
 
 fn print_usage() {
     print!("{}", usage_text());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every flag the help text offers must be a flag of at least one command,
+    /// and every flag a command accepts must be in the help.
+    ///
+    /// The table and the prose are two halves of one promise to the user, and
+    /// the failure they guard against is the quiet kind: a flag the help
+    /// documents and nothing accepts, or a command that takes a flag the help
+    /// never mentions. `--as` was in neither list for `translate` and silently
+    /// ignored, which is exactly what this test rules out.
+    #[test]
+    fn help_text_matches_this_table() {
+        let help = usage_text();
+        let universal = ["help", "version"];
+        for (command, values, bools) in Args::ACCEPTED {
+            for flag in values.iter().chain(bools.iter()) {
+                assert!(
+                    help.contains(&format!("--{flag}")),
+                    "`kintsugi {command}` accepts --{flag}, which the help text never mentions"
+                );
+            }
+        }
+        // Every `--flag` the help names, in both the usage lines and the prose.
+        for token in help.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')') {
+            let Some(flag) = token.strip_prefix("--") else {
+                continue;
+            };
+            let flag = flag.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+            if flag.is_empty() || flag.contains('=') {
+                continue;
+            }
+            let known = Args::VALUE_FLAGS.contains(&flag)
+                || Args::BOOL_FLAGS.contains(&flag)
+                || universal.contains(&flag);
+            assert!(
+                known,
+                "the help text offers --{flag}, which no command accepts: either add it to \
+                 Args::ACCEPTED or stop documenting it"
+            );
+        }
+    }
+
+    /// Every command in the dispatch table parses its own flags, and a command
+    /// cannot be dispatched without one.
+    #[test]
+    fn every_command_is_in_the_flag_table() {
+        for command in [
+            "demo",
+            "detect",
+            "inspect",
+            "play",
+            "upscale",
+            "interpolate",
+            "translate",
+            "install",
+            "version",
+            "help",
+        ] {
+            assert!(
+                Args::accepted(command).is_some(),
+                "`kintsugi {command}` is dispatched but has no entry in Args::ACCEPTED"
+            );
+        }
+    }
 }

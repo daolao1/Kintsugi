@@ -184,7 +184,7 @@ both `≒`), so re-encoding a name is a way to change a file nobody asked to
 change. Two entries whose byte ranges overlap are refused: rewriting one would
 change the other. With no replacements both files come back byte-identical
 (including gaps, trailing bytes and anything after the index records), which is
-what `write_script`'s rule 5 checks — four tests in `snn.rs`, and
+what `write_script`'s rule 6 checks — four tests in `snn.rs`, and
 `crates/kintsugi/tests/cli.rs` installs a translated script into a packed
 archive and reads it back through the seam.
 

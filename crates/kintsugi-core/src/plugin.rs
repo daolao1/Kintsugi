@@ -108,6 +108,36 @@ pub trait EngineMount: Send {
         ))
     }
 
+    /// Which script is the game's, for a caller that did not name one.
+    ///
+    /// The host must not know that one engine's main script is called
+    /// `story.bdt`, or that scripts have extensions at all, so the seam
+    /// answers: this is the engine's own convention, and it belongs here with
+    /// the rest of the engine's knowledge.
+    ///
+    /// Refusing is a supported, and often the honest, answer — a game with
+    /// several scripts and no obvious main one is a question only the person
+    /// holding the game can settle. A seam that does answer must name a script
+    /// it can actually read out of a mount of its own game, which
+    /// `kintsugi-testkit` checks.
+    fn primary_script(&self) -> Result<VirtualPath> {
+        Err(Error::unsupported(
+            self.info().engine.clone(),
+            "this seam does not name a main script",
+        ))
+    }
+
+    /// Extensions this seam's [`EngineMount::read_image`] accepts, bare and
+    /// lower-case, so a caller can list a game's pictures or pick one when the
+    /// user did not.
+    ///
+    /// Empty means the seam does not decode images. This is discovery, not
+    /// evidence: an extension still earns no trust, and a seam stays free to
+    /// refuse a file that carries one of these.
+    fn image_extensions(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Write a repaired script back out, when this seam knows how.
     ///
     /// `replacements` maps a command index — the same `id` a translation

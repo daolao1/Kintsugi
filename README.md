@@ -42,6 +42,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
 | **Install**: put a repaired script into a copy of the game — including a script packed inside an archive, which means rewriting the archive and its index — refusing a patch whose lines do not line up or change nothing, reading the copy back to prove it landed, recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf`, and removing a copy it made if the install does not finish (an install either finishes or leaves nothing) | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
+| **Engine-agnostic host**: which script a game is played through, and which files are its pictures, come from the seam (`primary_script`, `image_extensions`) rather than from names hardcoded in the CLI; a flag a command does not use exits `2` instead of being silently ignored, and `--help` anywhere prints usage | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam contract**: `kintsugi-testkit` — a new engine runs the same checks BlueGale does (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, and tested against eight deliberately broken seams |
 | **Seam №2…N** — other engines | the reason the body exists; [adding one](docs/ADDING-AN-ENGINE.md) is a crate and two registration lines |
@@ -55,7 +56,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 144 tests, all fixtures synthesized
+cargo test                                     # 152 tests, all fixtures synthesized
 scripts/smoke.sh target/release/kintsugi       # the repair loop, end to end, on this machine
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game

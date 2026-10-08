@@ -61,4 +61,16 @@ if [ "$code" -ne 2 ]; then
   exit 1
 fi
 
+# A flag that exists but belongs to another command is a mistake too, not
+# something to accept and ignore.
+code=0
+"$exe" detect "$demo" --factor 4 > /dev/null 2>&1 || code=$?
+if [ "$code" -ne 2 ]; then
+  echo "smoke: 'detect --factor 4' exited $code, not 2" >&2
+  exit 1
+fi
+
+# Asking for help anywhere is answered, and answered successfully.
+"$exe" translate --help | grep -q "Usage:"
+
 echo "smoke: the whole repair loop works through $exe"

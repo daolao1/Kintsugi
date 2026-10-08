@@ -72,8 +72,17 @@ pub trait EngineMount: Send {
     fn read_script(&self, path: &VirtualPath) -> Result<Script>;    // optional
     fn write_script(&self, path: &VirtualPath,
                     replacements: &BTreeMap<usize, String>) -> Result<WrittenScript>; // optional
+    fn primary_script(&self) -> Result<VirtualPath>;                // optional: which script is the game's
+    fn image_extensions(&self) -> &'static [&'static str];          // optional: what read_image accepts
 }
 ```
+
+The last two exist so the host stays ignorant of engines. Which file a game is
+played through is engine knowledge — one engine's main script is `story.bdt`,
+another's is `scenario.ks` — and so is what a picture is called. A host that
+hardcodes either repairs the wrong file the day engine №2 arrives, so it asks
+the seam, and `--as`/`--script` puts the answer in the user's hands when the
+seam refuses to guess (a game with several scripts and no obvious main one).
 
 Every method except `info` and `vfs` has a default that **refuses**:
 
@@ -91,10 +100,11 @@ every seam runs in its own test suite (BlueGale's is
 `crates/kintsugi-bluegale/tests/conformance.rs`). It checks that a name is
 never evidence, that a `Certain` verdict can actually be mounted, that a seam
 names itself in every verdict and mount, that an empty folder is nobody's game,
-and that `write_script` with no replacements returns every file it claims to
-change byte-for-byte, including the script's own bytes. The checker has its own
-tests against eight deliberately broken seams, so the rules are enforced rather
-than asserted. Adding engine №2 starts at
+that `write_script` with no replacements returns every file it claims to change
+byte-for-byte, including the script's own bytes, and that a seam naming a
+script can hand that script over out of a mount of its own game. The checker has
+its own tests against ten deliberately broken seams, so the rules are enforced
+rather than asserted. Adding engine №2 starts at
 [docs/ADDING-AN-ENGINE.md](docs/ADDING-AN-ENGINE.md).
 
 ### A packed script is two files, and the newer layer stays on top
