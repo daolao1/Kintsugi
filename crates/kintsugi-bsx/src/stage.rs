@@ -421,8 +421,10 @@ pub fn emit(
         })
         .collect();
 
-    // Which programs are entered by a choice, and their sibling groups.
-    let mut branch_targets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // Which programs are entered by a choice, and their sibling groups,
+    // remembering the choice's owner so the merge search can never point a
+    // branch back into it (which would loop the choice forever).
+    let mut branch_targets: BTreeMap<usize, (usize, Vec<usize>)> = BTreeMap::new();
     for (index, anchors) in all_anchors.iter().enumerate() {
         let targets: Vec<usize> = anchors
             .iter()
@@ -436,12 +438,11 @@ pub fn emit(
             // once per choice point.
             branch_targets
                 .entry(targets.iter().min().copied().unwrap_or(0))
-                .or_insert(targets.clone());
+                .or_insert((programs[index].index, targets.clone()));
         }
-        let _ = index;
     }
     let mut merge_of: BTreeMap<usize, usize> = BTreeMap::new();
-    for targets in branch_targets.values() {
+    for (owner, targets) in branch_targets.values() {
         let Some(merge_line) = targets
             .iter()
             .filter_map(|&target| {
@@ -456,7 +457,7 @@ pub fn emit(
         // The merge program is the first in file order, outside the sibling
         // group, that shows the line after both branches end.
         for (position, anchors) in all_anchors.iter().enumerate() {
-            if targets.contains(&programs[position].index) {
+            if programs[position].index == *owner || targets.contains(&programs[position].index) {
                 continue;
             }
             let shows_merge = anchors.iter().any(|anchor| match anchor {
@@ -551,7 +552,7 @@ pub fn emit(
             commands.push(Command::Jump(program_label(merge, name)));
         } else if branch_targets
             .values()
-            .any(|group| group.contains(&program.index))
+            .any(|(_, group)| group.contains(&program.index))
         {
             unresolved_merges += 1;
         }
@@ -587,7 +588,7 @@ pub fn emit(
         unresolved.sort();
         unresolved.dedup();
         notes.push(format!(
-            "the code names {} resource(s) with no file in the archives ({}): engine built-ins \
+            "The code names {} resource(s) with no file in the archives ({}): engine built-ins \
              this seam cannot draw, skipped rather than guessed.",
             unresolved.len(),
             unresolved

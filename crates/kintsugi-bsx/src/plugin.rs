@@ -527,7 +527,7 @@ impl BsxMount {
         let mut notes = emission.notes;
         if names.is_empty() {
             notes.push(
-                "the resource name table was not found in this story, so the code's resource \
+                "The resource name table was not found in this story, so the code's resource \
                  instructions play nameless: no backgrounds, no music, no voices."
                     .to_string(),
             );
