@@ -74,7 +74,7 @@ impl MountInfo {
 }
 
 /// The playable view a seam builds over a mounted game.
-pub trait EngineMount: Send {
+pub trait EngineMount: Send + Sync {
     /// Engine and visible work notes.
     fn info(&self) -> &MountInfo;
 

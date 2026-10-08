@@ -115,6 +115,26 @@ cargo run --release -p kintsugi -- play    "/path/to/game"      # read its scrip
 cargo run --release -p kintsugi -- upscale "/path/to/game"      # list image assets
 ```
 
+### Reading in a window
+
+One window for macOS, Windows and Linux — the same story IR, presented
+with pixels instead of text. The window is a shell: it renders what the
+events say and answers the questions the story asks, nothing more.
+
+```sh
+cargo run --release -p kintsugi-desktop -- "/path/to/game"
+```
+
+Click, Space or Enter advances; 1–9 and the arrow keys answer choices; Esc
+closes the book. Text is drawn with a system font the shell finds on its
+own (`KINTSUGI_FONT` names one when it cannot). Where no screen exists —
+CI, a build box — the same presentation runs headless and writes the frames
+it would have shown:
+
+```sh
+cargo run --release -p kintsugi-desktop -- "/path/to/game" --dump-frames /tmp/frames
+```
+
 Originals are never written to. The only files Kintsugi creates are the ones
 you ask for (`-o out.png`, `--jsonl-dir dir`, `install --into copy`, the demo
 game), and the game folder is read-only to every command — checked in the code
@@ -380,6 +400,11 @@ fails if the output is wrong. See
 | Windows | `kintsugi-windows-x86_64.zip` | native build on `windows-latest` |
 | Linux | `kintsugi-linux-x86_64.tar.gz` | native build |
 | Android | `app-debug.apk` (arm64-v8a, armeabi-v7a, x86_64, x86) | `cargo ndk` → `jniLibs` → Gradle |
+
+The desktop artifacts carry the terminal host; the windowed shell
+(`kintsugi-desktop`) builds from the same commit with
+`cargo build --release -p kintsugi-desktop` and joins the release table once
+its packaging is worth shipping.
 
 Android details, including the folder-picker limitation and how to load a real
 game today: [platforms/android/README.md](platforms/android/README.md) and

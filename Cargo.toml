@@ -8,6 +8,7 @@ members = [
     "crates/kintsugi-translate",
     "crates/kintsugi-android",
     "crates/kintsugi-testkit",
+    "crates/kintsugi-desktop",
     "crates/kintsugi",
 ]
 
@@ -27,6 +28,7 @@ kintsugi-video = { path = "crates/kintsugi-video" }
 kintsugi-translate = { path = "crates/kintsugi-translate" }
 kintsugi-android = { path = "crates/kintsugi-android" }
 kintsugi-testkit = { path = "crates/kintsugi-testkit" }
+kintsugi-desktop = { path = "crates/kintsugi-desktop" }
 encoding_rs = "0.8"
 
 [profile.release]

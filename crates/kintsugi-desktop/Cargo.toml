@@ -1,0 +1,15 @@
+[package]
+name = "kintsugi-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop shell for the Kintsugi engine: a window, a framebuffer, and a Host. No engine logic lives here."
+
+[dependencies]
+kintsugi-core.workspace = true
+kintsugi-bluegale = { workspace = true }
+kintsugi-bsx = { workspace = true }
+winit = "0.30"
+softbuffer = "0.4"
+ab_glyph = "0.2"
