@@ -1,0 +1,16 @@
+[package]
+name = "kintsugi-nscripter"
+description = "Golden seam for the NScripter engine: nscript.dat scripts, SAR/NSA archives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kintsugi-core.workspace = true
+encoding_rs.workspace = true
+
+[dev-dependencies]
+kintsugi-testkit.workspace = true

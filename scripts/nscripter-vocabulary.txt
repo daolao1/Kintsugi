@@ -1,0 +1,27 @@
+# How the NScripter command list in crates/kintsugi-nscripter/src/command.rs
+# was extracted, so that it can be redone and checked.
+#
+# 1. Get ONScripter (ogapee's reimplementation of NScripter, GPL-2):
+#
+#        git clone --depth 1 https://github.com/ogapee/onscripter
+#
+# 2. Take the name of every *Command definition in the engine's own dispatch
+#    table, which is what the engine answers to:
+#
+#        grep -hoE '\b[A-Za-z_][A-Za-z0-9_]*Command\b' \
+#            onscripter/src/ScriptParser_command.cpp \
+#            onscripter/src/ONScripter_command.cpp \
+#          | sed 's/Command$//' | tr 'A-Z' 'a-z' | sort -u
+#
+# 3. Drop the table's own furniture (entries that exist to fill the table rather
+#    than to be typed in a script), and add nothing that is not in it. The list
+#    is an interface: if a name is not in the engine's dispatch table, a script
+#    that uses it is not an NScripter script.
+#
+# Result at the time of writing: 273 names, sorted and unique, held in
+# `COMMANDS` in the file named above. The crate's own test checks that it stays
+# sorted and unique, because the lookup is a binary search over it.
+#
+# No ONScripter code is copied into Kintsugi. Names are facts about a format,
+# like HTML tag names; what the engine *does* with them is documented in
+# docs/RESEARCH-NSCRIPTER.md or, where it is not yet understood, refused by name.
