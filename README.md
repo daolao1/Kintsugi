@@ -396,15 +396,15 @@ fails if the output is wrong. See
 
 | platform | artifact | how the engine gets there |
 | --- | --- | --- |
-| macOS | `kintsugi-macos-universal.tar.gz` (arm64 + x86_64, `lipo`-joined) | native build |
-| Windows | `kintsugi-windows-x86_64.zip` | native build on `windows-latest` |
-| Linux | `kintsugi-linux-x86_64.tar.gz` | native build |
+| macOS | `kintsugi-macos-universal.tar.gz` — `kintsugi` (CLI) + `kintsugi-desktop` (the window), arm64 + x86_64, `lipo`-joined | native build |
+| Windows | `kintsugi-windows-x86_64.zip` — CLI + window | native build on `windows-latest` |
+| Linux | `kintsugi-linux-x86_64.tar.gz` — CLI + window | native build |
 | Android | `app-debug.apk` (arm64-v8a, armeabi-v7a, x86_64, x86) | `cargo ndk` → `jniLibs` → Gradle |
 
-The desktop artifacts carry the terminal host; the windowed shell
-(`kintsugi-desktop`) builds from the same commit with
-`cargo build --release -p kintsugi-desktop` and joins the release table once
-its packaging is worth shipping.
+The window is smoke-tested like everything else: CI plays the demo game
+through the shell's headless twin and the job fails if the frames are not
+written — "the window works" is a fact about the artifact, not a hope about
+the build.
 
 Android details, including the folder-picker limitation and how to load a real
 game today: [platforms/android/README.md](platforms/android/README.md) and
