@@ -268,12 +268,24 @@ and repairs it**; what follows is what is established, and how.
 
 **Not implemented:** the bytecode, and the records that are not string tables —
 `0x4534e`+11,864, `0x45460`+1,688, `0x45b00`+2,006, `0x462e0`+15,528,
-`0x49f90`+35,204. The first of those holds u32 string indices in some order
-(11,860–11,863 appear together near its start, which is where the story's
-`見に行く` / `見に行かない` choice lives), so it is very likely the table saying
-which line belongs to which scene — exactly the classification (`Narration`,
-`Dialogue`, `Choice`) the body's IR would want, and exactly what this seam does
-not claim. Every line is therefore handed over as `Command::RawLine` with a
+`0x49f90`+35,204. Those are where the classification (`Narration`, `Dialogue`,
+`Choice`) would come from, and one measurement says how far away it is.
+
+The first record is **not** a table of line references. Read as 4-byte integers,
+29 of its 2,966 values are below 11,864 — 1%, against a chance level of 0%. Read
+as 2-byte integers it is a different picture: 4,251 of 5,932 values (71.7%) are
+below 11,864 against a chance level of 18.1%, and 2,359 of them are zero. So the
+story's line numbers really are in this record, four times more often than
+coincidence would put them there, but as operands in compiled code — which is
+what a "show line N" instruction is — rather than as a table. Its tail is a run
+of alternating zero and a slowly increasing value (17,808, 17,813, 17,819,
+17,828, …), the shape of a directory rather than of text.
+
+An earlier draft of this section said those indices appeared "near its start",
+at `0x453ab`, `0x453f4` and `0x45425`. They do, if you read four bytes starting
+at an odd address: the values are real and the alignment was not, and a
+coincidence that reads like a finding is the most expensive kind. That sentence
+is gone and the measurement above is in its place. Every line is therefore handed over as `Command::RawLine` with a
 warning that says so, and `translate` extracts raw lines by default
 (`--only-typed` skips them) precisely for seams in this state.
 
