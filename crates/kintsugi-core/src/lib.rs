@@ -23,6 +23,7 @@ pub mod bytes;
 pub mod codec;
 pub mod detect;
 pub mod error;
+pub mod iso;
 pub mod plugin;
 pub mod prelude;
 pub mod runtime;
@@ -30,4 +31,5 @@ pub mod script;
 pub mod vfs;
 
 pub use error::{Error, Result};
+pub use iso::IsoSource;
 pub use vfs::VirtualPath;

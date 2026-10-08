@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -90,8 +92,51 @@ pub trait FileSource: Send + Sync {
     /// Read a whole virtual file into memory.
     fn read(&self, path: &VirtualPath) -> Result<Vec<u8>>;
 
+    /// Read `len` bytes starting at `offset` inside a virtual file.
+    ///
+    /// The default implementation reads the whole file and slices it, which is
+    /// correct for any source. Sources that can seek — a directory, a disc
+    /// image — should override it, because archives use this to read one
+    /// entry's extent out of a container that may be hundreds of megabytes, and
+    /// loading the whole container to hand back a kilobyte is the difference
+    /// between mounting a game and running out of memory.
+    fn read_range(&self, path: &VirtualPath, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let bytes = self.read(path)?;
+        let range = checked_range(path, offset, len, bytes.len() as u64)?;
+        Ok(bytes[range].to_vec())
+    }
+
     /// Every file this source provides, with byte sizes.
     fn list(&self) -> Vec<(VirtualPath, u64)>;
+}
+
+/// Check a byte range against the length of the file it points into.
+///
+/// Every source refuses a range past the end in the same words: a caller that
+/// asked for bytes the file does not have has a corrupt idea of the file's
+/// layout, and a short read would hide that from the seam above.
+pub(crate) fn checked_range(
+    path: &VirtualPath,
+    offset: u64,
+    len: usize,
+    file_len: u64,
+) -> Result<Range<usize>> {
+    let start = usize::try_from(offset).map_err(|_| {
+        Error::corrupt(
+            path.to_string(),
+            format!("offset {offset} does not fit in memory"),
+        )
+    })?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| Error::corrupt(path.to_string(), "range overflows".to_string()))?;
+    if end as u64 > file_len {
+        return Err(Error::corrupt(
+            path.to_string(),
+            format!("asked for bytes {start}..{end} of a {file_len} byte file"),
+        ));
+    }
+    Ok(start..end)
 }
 
 /// A file source that lives in memory.
@@ -135,17 +180,29 @@ impl MemorySource {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
-}
 
-impl FileSource for MemorySource {
-    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+    /// The bytes under a path, or the refusal that says what this source does
+    /// hold.
+    fn bytes(&self, path: &VirtualPath) -> Result<&Vec<u8>> {
         match self.files.get(path) {
-            Some(bytes) => Ok(bytes.clone()),
+            Some(bytes) => Ok(bytes),
             None => Err(Error::NotFound(format!(
                 "'{path}' is not in this in-memory source (it holds {} file(s))",
                 self.files.len()
             ))),
         }
+    }
+}
+
+impl FileSource for MemorySource {
+    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+        Ok(self.bytes(path)?.clone())
+    }
+
+    fn read_range(&self, path: &VirtualPath, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let bytes = self.bytes(path)?;
+        let range = checked_range(path, offset, len, bytes.len() as u64)?;
+        Ok(bytes[range].to_vec())
     }
 
     fn list(&self) -> Vec<(VirtualPath, u64)> {
@@ -213,18 +270,33 @@ impl DirectorySource {
             }
         }
     }
-}
 
-impl FileSource for DirectorySource {
-    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+    /// The real file a virtual path names.
+    fn locate(&self, path: &VirtualPath) -> Result<PathBuf> {
         let real = self.resolve(path)?;
         match real.is_file() {
-            true => Ok(fs::read(&real)?),
+            true => Ok(real),
             false => Err(Error::NotFound(format!(
                 "'{path}' (in {}) ",
                 self.root.display()
             ))),
         }
+    }
+}
+
+impl FileSource for DirectorySource {
+    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+        Ok(fs::read(self.locate(path)?)?)
+    }
+
+    fn read_range(&self, path: &VirtualPath, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let real = self.locate(path)?;
+        let range = checked_range(path, offset, len, fs::metadata(&real)?.len())?;
+        let mut file = fs::File::open(&real)?;
+        file.seek(SeekFrom::Start(range.start as u64))?;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
     }
 
     fn list(&self) -> Vec<(VirtualPath, u64)> {
@@ -261,6 +333,17 @@ impl Vfs {
         Ok(vfs)
     }
 
+    /// Build a VFS serving one ISO 9660 disc image.
+    ///
+    /// The disc-image twin of [`Vfs::from_directory`], for the common case of a
+    /// game that only ever existed on a CD: the image is the whole game, and
+    /// every read comes straight out of it.
+    pub fn from_iso(image: impl Into<PathBuf>) -> Result<Self> {
+        let mut vfs = Self::new();
+        vfs.push(Arc::new(crate::iso::IsoSource::open(image.into())?));
+        Ok(vfs)
+    }
+
     /// Number of mounted sources.
     pub fn source_count(&self) -> usize {
         self.sources.len()
@@ -293,6 +376,24 @@ impl Vfs {
         for source in &self.sources {
             match source.read(path) {
                 Ok(data) => return Ok(data),
+                Err(Error::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::NotFound(format!(
+            "'{path}' not found in {} mounted source(s)",
+            self.sources.len()
+        )))
+    }
+
+    /// Read `len` bytes starting at `offset` inside a virtual file.
+    ///
+    /// The first source that has the path serves it, exactly as [`Vfs::read`]
+    /// does, but a source that can seek only reads that far.
+    pub fn read_range(&self, path: &VirtualPath, offset: u64, len: usize) -> Result<Vec<u8>> {
+        for source in self.sources() {
+            match source.read_range(path, offset, len) {
+                Ok(bytes) => return Ok(bytes),
                 Err(Error::NotFound(_)) => continue,
                 Err(e) => return Err(e),
             }
@@ -373,6 +474,66 @@ mod tests {
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn a_range_read_answers_from_the_file_on_disk() {
+        let dir = std::env::temp_dir().join(format!("kintsugi-vfs-range-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scene.dat"), b"0123456789").unwrap();
+        let source = DirectorySource::new(&dir);
+        let path = VirtualPath::new("scene.dat");
+
+        assert_eq!(source.read_range(&path, 2, 3).unwrap(), b"234");
+        assert_eq!(source.read_range(&path, 0, 10).unwrap(), b"0123456789");
+        assert_eq!(source.read_range(&path, 10, 0).unwrap(), b"");
+        // Past the end is refused, not shortened: a caller that asked for bytes
+        // the file does not have has the file's layout wrong.
+        let past_end = source.read_range(&path, 8, 4).unwrap_err();
+        assert!(matches!(past_end, Error::Corrupt { .. }), "{past_end}");
+        assert!(
+            format!("{past_end}").contains("asked for bytes 8..12 of a 10 byte file"),
+            "{past_end}"
+        );
+        // The directory itself is not a file, and neither is a missing path.
+        assert!(matches!(
+            source.read_range(&VirtualPath::new("."), 0, 1),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            source.read_range(&VirtualPath::new("missing.dat"), 0, 1),
+            Err(Error::NotFound(_))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_range_read_falls_through_to_the_source_that_has_the_file() {
+        let dir = std::env::temp_dir().join(format!("kintsugi-vfs-stack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("archive.dat"), b"the loose copy").unwrap();
+
+        let mut vfs = Vfs::new();
+        // The topmost source does not have the path at all, so the range has to
+        // come out of the directory underneath.
+        vfs.push_front(Arc::new(MemorySource::single(
+            "other.dat",
+            "something else",
+        )));
+        vfs.push(Arc::new(DirectorySource::new(&dir)));
+        assert_eq!(
+            vfs.read_range(&VirtualPath::new("archive.dat"), 4, 5)
+                .unwrap(),
+            b"loose"
+        );
+        let missing = vfs
+            .read_range(&VirtualPath::new("absent.dat"), 0, 1)
+            .unwrap_err();
+        assert!(
+            format!("{missing}").contains("not found in 2 mounted source(s)"),
+            "{missing}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +558,25 @@ mod memory_source_tests {
             format!("{missing}").contains("holds 1 file(s)"),
             "the refusal should say what the source does have: {missing}"
         );
+    }
+
+    #[test]
+    fn a_range_read_takes_exactly_the_bytes_asked_for() {
+        let source = MemorySource::single("story.bdt", "hello world");
+        let path = VirtualPath::new("story.bdt");
+        assert_eq!(source.read_range(&path, 6, 5).unwrap(), b"world");
+        assert_eq!(source.read_range(&path, 0, 0).unwrap(), b"");
+        assert_eq!(source.read_range(&path, 11, 0).unwrap(), b"");
+        let past_end = source.read_range(&path, 6, 100).unwrap_err();
+        assert!(matches!(past_end, Error::Corrupt { .. }), "{past_end}");
+        assert!(
+            format!("{past_end}").contains("asked for bytes 6..106 of a 11 byte file"),
+            "{past_end}"
+        );
+        let missing = source
+            .read_range(&VirtualPath::new("other.bdt"), 0, 1)
+            .unwrap_err();
+        assert!(matches!(missing, Error::NotFound(_)), "{missing}");
     }
 
     #[test]
