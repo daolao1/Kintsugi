@@ -30,6 +30,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
+      # rodio links ALSA on Linux; the windowing crates want their headers
+      # too. Installed once here so clippy, test, and the C ABI check all
+      # see the same system the linux release job sees.
+      - name: audio and windowing libraries the workspace links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -194,7 +202,7 @@ jobs:
       - name: windowing libraries the build links against
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev
 
       - name: build
         run: |
