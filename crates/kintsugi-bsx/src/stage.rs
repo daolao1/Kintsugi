@@ -467,8 +467,9 @@ pub fn emit(
     let mut backward_links = 0usize;
     let mut forward_link_of: BTreeMap<usize, usize> = BTreeMap::new();
     for (position, anchors) in all_anchors.iter().enumerate() {
-        if let Some(Anchor::Call { target, .. }) =
-            anchors.iter().find(|anchor| matches!(anchor, Anchor::Call { .. }))
+        if let Some(Anchor::Call { target, .. }) = anchors
+            .iter()
+            .find(|anchor| matches!(anchor, Anchor::Call { .. }))
         {
             if start_of[target] > programs[position].start {
                 forward_link_of.insert(programs[position].index, *target);

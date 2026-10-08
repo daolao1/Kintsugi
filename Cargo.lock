@@ -977,6 +977,7 @@ dependencies = [
  "kintsugi-bluegale",
  "kintsugi-bsx",
  "kintsugi-core",
+ "kintsugi-video",
  "rodio",
  "softbuffer",
  "winit",

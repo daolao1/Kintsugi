@@ -16,12 +16,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use kintsugi_core::asset::Image;
 use kintsugi_core::plugin::EngineMount;
 use kintsugi_core::runtime::Interpreter;
 use kintsugi_core::script::Script;
 use kintsugi_core::{Error, Result};
 use kintsugi_desktop::audio::Player;
 use kintsugi_desktop::font::Pen;
+use kintsugi_desktop::glaze::Glaze;
 use kintsugi_desktop::render::{Frame, Scene, TEXT_BOX_TOP_FRACTION, TEXT_MARGIN, render};
 use kintsugi_desktop::state::{ChannelHost, GameState, Request, Response, initial_note};
 
@@ -48,28 +50,60 @@ struct App {
     /// The interpreter reached `End`; the last frame stays up until closed.
     finished: bool,
     pen: Option<Pen>,
+    /// The density the pen was loaded for; a move to a sharper screen
+    /// reloads it so text stays the size the reader was promised.
+    scale: u32,
+    /// The kiln that fires the art at the frame's density.
+    glaze: Glaze,
     responses: Sender<Response>,
     stopped: Arc<Mutex<bool>>,
 }
 
 impl App {
     /// What the reader sees right now, as a frame.
-    fn draw(&self) -> Frame {
+    /// The frame is this many times denser than the design size, rounded
+    /// down: 960×720 is 1, a Retina frame is 2. Density drives the pen size
+    /// and the chrome; the art's own scale is the glaze's call.
+    fn density_of(_width: u32, height: u32) -> u32 {
+        (height / 720).clamp(1, 4)
+    }
+
+    /// Load the pen for this density if it changed — a window carried to a
+    /// sharper screen gets sharper letters, not smaller ones.
+    fn set_density(&mut self, width: u32, height: u32) {
+        let scale = Self::density_of(width, height);
+        if scale != self.scale {
+            self.scale = scale;
+            let px = 20.0 * scale as f32;
+            self.pen = Pen::load(px);
+        }
+    }
+
+    fn draw(&mut self) -> Frame {
         let size = self
             .window
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| winit::dpi::PhysicalSize::new(960, 720));
         let (width, height) = (size.width.max(320), size.height.max(240));
+        self.set_density(width, height);
 
+        // The glaze fires the art at the frame's density; the borrow lives
+        // only until the scene borrows the fired pixels.
+        let glazed_background = self
+            .state
+            .background
+            .as_ref()
+            .map(|art| self.glaze.fire(art, width, height));
+        let glazed_characters: Vec<Arc<Image>> = self
+            .state
+            .characters
+            .iter()
+            .map(|(_, art)| self.glaze.fire(art, width, height))
+            .collect();
         let mut scene = Scene {
-            background: self.state.background.as_deref(),
-            characters: self
-                .state
-                .characters
-                .iter()
-                .map(|(_, image)| image.as_ref())
-                .collect(),
+            background: glazed_background.as_deref(),
+            characters: glazed_characters.iter().map(|art| art.as_ref()).collect(),
             speaker: self.state.speaker.as_deref(),
             lines: Vec::new(),
             seam_note: self.state.seam_note.as_deref(),
@@ -79,7 +113,14 @@ impl App {
             // No font on this machine: the scene still renders and the seam
             // note says why the box is empty. A shell that drew nothing and
             // said nothing would be lying by omission.
-            return render(&scene, width, height, 26, |_, _, _, _, _| {});
+            return render(
+                &scene,
+                width,
+                height,
+                26 * self.scale,
+                self.scale,
+                |_, _, _, _, _| {},
+            );
         };
 
         let max_width = width.saturating_sub(TEXT_MARGIN * 2);
@@ -116,6 +157,7 @@ impl App {
             width,
             height,
             pen.line_height(),
+            self.scale,
             |frame, x, y, text, colour| pen.draw(frame, x, y, text, colour),
         )
     }
@@ -333,6 +375,8 @@ pub fn run(mount: &dyn EngineMount, script: Script, extra_notes: Vec<String>) ->
         waiting: false,
         finished: false,
         pen,
+        scale: 1,
+        glaze: Glaze::default(),
         responses: response_tx,
         stopped: stopped.clone(),
     };

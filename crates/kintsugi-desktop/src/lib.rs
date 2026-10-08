@@ -8,5 +8,6 @@
 
 pub mod audio;
 pub mod font;
+pub mod glaze;
 pub mod render;
 pub mod state;

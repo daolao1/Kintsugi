@@ -126,16 +126,23 @@ pub const TEXT_BOX_TOP_FRACTION: f32 = 0.72;
 /// The margin around the text inside the box, in pixels at scale 1.
 pub const TEXT_MARGIN: u32 = 18;
 
-/// Draw the scene into a fresh frame. `draw_text` is the font half, kept as a
-/// parameter so the renderer's tests can pass a fake pen: a renderer that
-/// needed a system font to be tested would not be tested on a CI box.
+/// Draw the scene into a fresh frame. `scale` is the framebuffer's density
+/// against the design size — a Retina frame is 2 — and the chrome (margins,
+/// rules, gaps) scales with it; the art's resampling is the glazer's job, not
+/// the renderer's. `draw_text` is the font half, kept as a parameter so the
+/// renderer's tests can pass a fake pen: a renderer that needed a system font
+/// to be tested would not be tested on a CI box.
 pub fn render(
     scene: &Scene,
     width: u32,
     height: u32,
     line_height: u32,
+    scale: u32,
     mut draw_text: impl FnMut(&mut Frame, i64, i64, &str, u32),
 ) -> Frame {
+    let scale = scale.max(1);
+    let margin = (TEXT_MARGIN * scale) as i64;
+    let gap = 24 * scale;
     let mut frame = Frame::new(width, height);
 
     if let Some(background) = scene.background {
@@ -155,21 +162,21 @@ pub fn render(
         .iter()
         .map(|image| image.width as i64)
         .sum::<i64>()
-        + 24 * scene.characters.len().saturating_sub(1) as i64;
+        + gap as i64 * scene.characters.len().saturating_sub(1) as i64;
     let mut x = (width as i64 - total_width) / 2;
     for image in &scene.characters {
         frame.blit(image, x, height as i64 - image.height as i64);
-        x += image.width as i64 + 24;
+        x += image.width as i64 + gap as i64;
     }
 
     // The text box: a translucent band, a gold rule above it, and the text.
     let box_top = (height as f32 * TEXT_BOX_TOP_FRACTION) as i64;
     frame.fill_rect(0, box_top, width, height - box_top as u32, 0xC026_221C);
-    frame.fill_rect(0, box_top, width, 2, GOLD);
+    frame.fill_rect(0, box_top, width, 2 * scale, GOLD);
 
-    let text_top = box_top + TEXT_MARGIN as i64;
+    let text_top = box_top + margin;
     if let Some(speaker) = scene.speaker {
-        draw_text(&mut frame, TEXT_MARGIN as i64, text_top, speaker, GOLD);
+        draw_text(&mut frame, margin, text_top, speaker, GOLD);
     }
     let mut y = text_top
         + if scene.speaker.is_some() {
@@ -178,20 +185,14 @@ pub fn render(
             0
         };
     for line in &scene.lines {
-        draw_text(&mut frame, TEXT_MARGIN as i64, y, line, INK);
+        draw_text(&mut frame, margin, y, line, INK);
         y += line_height as i64;
     }
 
     // The seam's note sits in the top-left, small and dim, where a reader who
     // wants the truth finds it and a reader who does not is not interrupted.
     if let Some(note) = scene.seam_note {
-        draw_text(
-            &mut frame,
-            TEXT_MARGIN as i64,
-            TEXT_MARGIN as i64,
-            note,
-            0xFF8A_8378,
-        );
+        draw_text(&mut frame, margin, margin, note, 0xFF8A_8378);
     }
 
     frame
@@ -218,7 +219,7 @@ mod tests {
 
     #[test]
     fn an_empty_scene_is_lacquer_with_a_text_box() {
-        let frame = render(&Scene::default(), 100, 100, 26, no_text);
+        let frame = render(&Scene::default(), 100, 100, 26, 1, no_text);
         assert_eq!(frame.at(50, 10), BACKGROUND, "above the box: lacquer");
         let box_top = (100.0 * TEXT_BOX_TOP_FRACTION) as i64;
         let in_box = frame.at(50, box_top + 10);
@@ -234,7 +235,7 @@ mod tests {
             background: Some(&bg),
             ..Scene::default()
         };
-        let frame = render(&scene, 100, 100, 26, no_text);
+        let frame = render(&scene, 100, 100, 26, 1, no_text);
         assert_eq!(
             frame.at(50, 45) & 0xFF0000,
             200 << 16,
@@ -279,7 +280,7 @@ mod tests {
             ..Scene::default()
         };
         let mut calls = Vec::new();
-        let _ = render(&scene, 100, 100, 26, |_, _, _, text, colour| {
+        let _ = render(&scene, 100, 100, 26, 1, |_, _, _, text, colour| {
             calls.push((text.to_string(), colour));
         });
         assert_eq!(
@@ -299,7 +300,7 @@ mod tests {
             ..Scene::default()
         };
         let mut seen = Vec::new();
-        let _ = render(&scene, 100, 100, 26, |_, _, _, text, _| {
+        let _ = render(&scene, 100, 100, 26, 1, |_, _, _, text, _| {
             seen.push(text.to_string())
         });
         assert_eq!(seen, vec!["this seam reads text only".to_string()]);

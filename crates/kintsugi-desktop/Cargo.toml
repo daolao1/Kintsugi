@@ -10,6 +10,7 @@ description = "Desktop shell for the Kintsugi engine: a window, a framebuffer, a
 kintsugi-core.workspace = true
 kintsugi-bluegale = { workspace = true }
 kintsugi-bsx = { workspace = true }
+kintsugi-video.workspace = true
 winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"

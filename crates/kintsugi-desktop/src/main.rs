@@ -215,6 +215,9 @@ fn render_state(
     };
     match pen {
         Some(pen) => {
+            // The dump frame is the design size: scale 1, the window at its
+            // honest density does the glazing.
+
             let max_width = width.saturating_sub(TEXT_MARGIN * 2);
             scene.lines = pen.wrap(&state.text, max_width);
             render(
@@ -222,10 +225,11 @@ fn render_state(
                 width,
                 height,
                 pen.line_height(),
+                1,
                 |frame, x, y, text, colour| pen.draw(frame, x, y, text, colour),
             )
         }
-        None => render(&scene, width, height, 26, |_, _, _, _, _| {}),
+        None => render(&scene, width, height, 26, 1, |_, _, _, _, _| {}),
     }
 }
 
