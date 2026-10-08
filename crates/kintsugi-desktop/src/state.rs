@@ -8,12 +8,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kintsugi_core::asset::Image;
+use kintsugi_core::asset::{Audio, Image};
 use kintsugi_core::plugin::EngineMount;
 use kintsugi_core::runtime::{Event, Host};
 use kintsugi_core::script::{ChoiceOption, Script};
 use kintsugi_core::vfs::VirtualPath;
 use kintsugi_core::{Error, Result};
+
+use crate::audio::Player;
 
 /// Everything needed to draw one frame. Cheap to clone: the pictures are
 /// shared, the strings are short.
@@ -134,6 +136,7 @@ pub struct ChannelHost<'m> {
     requests: Sender<Request>,
     responses: Receiver<Response>,
     stopped: Arc<Mutex<bool>>,
+    player: Option<Player>,
 }
 
 impl<'m> ChannelHost<'m> {
@@ -150,7 +153,15 @@ impl<'m> ChannelHost<'m> {
             requests,
             responses,
             stopped,
+            player: None,
         }
+    }
+
+    /// Give the host a voice: `Some` plays the cues, `None` — a machine
+    /// with no audio device — leaves the play silent without failing it.
+    pub fn with_player(mut self, player: Option<Player>) -> Self {
+        self.player = player;
+        self
     }
 
     fn is_stopped(&self) -> bool {
@@ -169,6 +180,46 @@ impl<'m> ChannelHost<'m> {
             *flag = true;
         }
     }
+
+    /// Sound the cue, if this host was given a voice. A cue whose bytes
+    /// will not decode is noted on screen — the gold shows its seams —
+    /// and the scene goes on.
+    fn play(&mut self, event: &Event) {
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let audio = |name: &str, state: &mut GameState| -> Option<Audio> {
+            match self_mount_read(self.mount, name) {
+                Ok(audio) => Some(audio),
+                Err(error) => {
+                    state.seam_note = Some(format!(
+                        "the code plays '{name}', which would not read: {error}"
+                    ));
+                    None
+                }
+            }
+        };
+        match event {
+            Event::Music(name) => match name {
+                Some(name) => {
+                    let audio = audio(name, &mut self.state);
+                    player.music(audio);
+                }
+                None => player.music(None),
+            },
+            Event::Sound(name) => {
+                if let Some(audio) = audio(name, &mut self.state) {
+                    player.sound(audio);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Read the cue's bytes through the seam.
+fn self_mount_read(mount: &dyn EngineMount, name: &str) -> kintsugi_core::Result<Audio> {
+    mount.read_audio(&VirtualPath::new(name))
 }
 
 impl Host for ChannelHost<'_> {
@@ -196,6 +247,7 @@ impl Host for ChannelHost<'_> {
             std::thread::sleep(Duration::from_millis(ms as u64));
             return Ok(());
         }
+        self.play(&event);
         self.state.apply_event(self.mount, &event);
         Ok(())
     }

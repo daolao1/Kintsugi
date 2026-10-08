@@ -13,3 +13,4 @@ kintsugi-bsx = { workspace = true }
 winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
+rodio = "0.19"

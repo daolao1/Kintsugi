@@ -6,6 +6,7 @@
 //! knows arrives through `Host` calls; this crate owns pixels, fonts, input
 //! and timing, never engine formats.
 
+pub mod audio;
 pub mod font;
 pub mod render;
 pub mod state;

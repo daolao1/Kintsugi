@@ -20,6 +20,7 @@ use kintsugi_core::plugin::EngineMount;
 use kintsugi_core::runtime::Interpreter;
 use kintsugi_core::script::Script;
 use kintsugi_core::{Error, Result};
+use kintsugi_desktop::audio::Player;
 use kintsugi_desktop::font::Pen;
 use kintsugi_desktop::render::{Frame, Scene, TEXT_BOX_TOP_FRACTION, TEXT_MARGIN, render};
 use kintsugi_desktop::state::{ChannelHost, GameState, Request, Response, initial_note};
@@ -342,7 +343,12 @@ pub fn run(mount: &dyn EngineMount, script: Script, extra_notes: Vec<String>) ->
     let story_result = std::thread::scope(|scope| {
         let story_stopped = stopped.clone();
         let story = scope.spawn(move || {
-            let mut host = ChannelHost::new(mount, story_tx, response_rx, story_stopped);
+            let player = Player::try_new();
+            if player.is_none() {
+                eprintln!("  · no audio device answered; the play will be silent");
+            }
+            let mut host =
+                ChannelHost::new(mount, story_tx, response_rx, story_stopped).with_player(player);
             Interpreter::new(script).run(&mut host)
         });
 
