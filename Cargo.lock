@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "kintsugi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kintsugi-bluegale",
  "kintsugi-core",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "kintsugi-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jni",
  "kintsugi-bluegale",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "kintsugi-bluegale"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "kintsugi-core",
@@ -300,11 +300,11 @@ dependencies = [
 
 [[package]]
 name = "kintsugi-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "kintsugi-translate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kintsugi-core",
  "serde",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "kintsugi-video"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kintsugi-core",
 ]

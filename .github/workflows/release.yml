@@ -39,6 +39,27 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
 
+      # v0.1.1 was published with binaries that answered `--version` with
+      # "0.1.0", because the tag and the crate version are two numbers that had
+      # never been introduced to each other. A user reporting a bug against the
+      # wrong version is a cost paid by whoever reads the report.
+      - name: the tag matches the version in the binary
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "workspace version: ${version}"
+          grep -q "versionName = \"${version}\"" platforms/android/app/build.gradle.kts \
+            || { echo "the APK's versionName is not ${version}"; exit 1; }
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              tag="${GITHUB_REF#refs/tags/v}"
+              [ "${tag}" = "${version}" ] \
+                || { echo "tag v${tag} does not match version ${version}"; exit 1; }
+              echo "tag v${tag} matches the workspace version" ;;
+            *) echo "not a tag; nothing to match" ;;
+          esac
+
       - name: C ABI checked from C
         run: |
           set -euo pipefail
