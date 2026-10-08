@@ -42,6 +42,11 @@ fn run(args: &[&str]) -> Output {
 fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kintsugi"));
     command.args(args);
+    // Colour is for eyes, not for assertions. The binary honours `NO_COLOR`,
+    // and a test that matched gold-coloured text would pass only in a shell
+    // that happened to set it — which is exactly how one did, on one of three
+    // CI platforms.
+    command.env("NO_COLOR", "1");
     for (key, value) in env {
         command.env(key, value);
     }
