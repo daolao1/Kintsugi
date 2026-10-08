@@ -123,7 +123,7 @@ jobs:
             -output target/kintsugi-desktop-macos-universal
 
       - name: smoke test the desktop shell
-        run: scripts/smoke-desktop.sh ./target/kintsugi-desktop-macos-universal
+        run: scripts/smoke-desktop.sh ./target/kintsugi-desktop-macos-universal ./target/kintsugi-macos-universal
 
       - name: package
         run: |
@@ -169,7 +169,7 @@ jobs:
 
       - name: smoke test the desktop shell
         shell: bash
-        run: scripts/smoke-desktop.sh target/x86_64-pc-windows-msvc/release/kintsugi-desktop.exe "$RUNNER_TEMP/kintsugi-desktop-smoke"
+        run: scripts/smoke-desktop.sh target/x86_64-pc-windows-msvc/release/kintsugi-desktop.exe target/x86_64-pc-windows-msvc/release/kintsugi.exe "$RUNNER_TEMP/kintsugi-desktop-smoke"
 
       - name: package
         shell: bash
@@ -213,7 +213,7 @@ jobs:
         run: scripts/smoke.sh ./target/release/kintsugi
 
       - name: smoke test the desktop shell
-        run: scripts/smoke-desktop.sh ./target/release/kintsugi-desktop
+        run: scripts/smoke-desktop.sh ./target/release/kintsugi-desktop ./target/release/kintsugi
 
       - name: package
         run: |
