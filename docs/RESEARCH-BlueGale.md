@@ -67,11 +67,11 @@ enumerate `.inx` and look for the sibling `.snn`; we also reject an empty name
 after NUL-trimming (GARbro does not check) and decode the `0x40`-byte name as
 CP932, whereas the encoding of GARbro's two-argument `ReadString` overload is
 invisible in `ArcSNN.cs`, so **the reference's name encoding is unconfirmed**
-(§8.6). `VirtualPath::new` lower-cases paths, so the mounted view shows
-`title.zbm` for `TITLE.ZBM`; every valid pair is mounted, each pushed to the
-front of the `Vfs` in sorted order, so with several pairs the alphabetically
-last shadows the rest (**not yet verified**). The `.snn` has no header: raw
-entry data that only the INX gives structure to.
+(§8.6). `VirtualPath::new` lower-cases paths (`title.zbm` for `TITLE.ZBM`), and
+every valid pair is mounted, each pushed to the front of the `Vfs` in sorted
+order, so with several pairs the alphabetically last shadows the rest (**not yet
+verified**). The `.snn` has no header: raw entry data that only the INX gives
+structure to.
 
 ## 2. ZBM — compressed bitmaps (`amp_`)
 
@@ -91,26 +91,25 @@ we also require `data_offset <= len` and cap the payload at 256 MiB
 file is known to approach.
 
 **The LZ stream** (`ZbmFormat.Unpack`; ours `zbm::lz_unpack`). Bits are
-MSB-first: `MsbBitStream.GetBits` shifts cached bits left and returns the top
-`count`, and `crates/kintsugi-core/src/bytes.rs`'s `MsbBitReader` agrees
+MSB-first: `MsbBitStream.GetBits` returns the top of a left-shifted cache, and
+`crates/kintsugi-core/src/bytes.rs`'s `MsbBitReader` agrees
 (`(b >> (7 - bit)) & 1`). Exactly **one** bit is read and discarded before the
 loop — the only flag in the format; tokens carry their own. Then, per 8-bit
 token `t`: `t == 0` ends the stream; `t <= 0x7F` copies the next `t` literal
 bytes (8 bits each); `t > 0x7F` is a back-reference — 10 more bits of distance,
 and `t & 0x7F` bytes copied from `written - offset` **byte by byte**, so a copy
 may overlap and read what it just wrote (`Binary.CopyOverlapped` in GARbro).
-Both clip the copy to the remaining space and stop when the bits run out.
-
-We are stricter, and fail loudly, where GARbro is silent: `offset == 0` or an
-offset past the bytes written, and a stream ending before the declared size, are
-both `Error::Corrupt` — whether any real file relies on the reference's
-tolerance (a short buffer) is **unconfirmed**.
+Both clip the copy to the remaining space and stop when the bits run out. We are
+stricter where GARbro is silent: `offset == 0`, an offset past the bytes
+written, and a stream ending before the declared size are all `Error::Corrupt`
+(the reference returns a short buffer) — whether any real file needs that
+tolerance is **unconfirmed**.
 
 **Obfuscation.** After unpacking, if the first bytes are `0xBD 0xB2` (`'B' ^
 0xFF`, `'M' ^ 0xFF`) the first `min(100, len)` bytes are XOR-ed with `0xFF`
-(`zbm::deobfuscate`; `ZbmFormat.Decrypt`). The payload was obfuscated *before*
-packing, so un-XORing happens *after* unpacking; `fixtures::make_zbm` mirrors
-that. The result is a plain BMP, which we hand to
+(`zbm::deobfuscate`; `ZbmFormat.Decrypt`): the payload was obfuscated *before*
+packing, so un-XORing happens *after* unpacking, and `fixtures::make_zbm`
+mirrors that. The result is a plain BMP for
 `crates/kintsugi-core/src/codec/bmp.rs::decode_bmp`; GARbro instead reads
 width/height/bpp from BMP-absolute offsets `0x12`/`0x16`/`0x1C`. `is_zbm` checks
 only length ≥ 14 and the magic, so a loose ZBM is weak evidence (§6); version,
@@ -165,17 +164,15 @@ repair; an unclassified raw line is a visible crack.
 
 **Writing back.** `bdt::rewrite_bdt` (`bdt.rs`), exposed as
 `EngineMount::write_script` (`plugin.rs`), walks the original with the *same*
-command indexing as `parse_bdt` and replaces only the text of the named lines.
-It never goes through `Command::Label`: sigils, `\t` indentation, CRLF or LF
+command indexing as `parse_bdt` and replaces only the text of named lines. It
+never goes through `Command::Label`, so sigils, `\t` indentation, CRLF or LF
 endings, blank lines, a missing trailing newline, and unknown bytes survive
-verbatim, and labels are never rewritten precisely because the sigil is not in
-the IR. A translation containing a line break, or one that would start with
-`$`/`%` after tabs, is refused as a structural change rather than a wording
-change; ids with no home in the original come back as `unmatched`, not dropped.
-Nine writer tests in `bdt.rs` (13 there in total) cover this, plus
-`crates/kintsugi/tests/patch.rs` at the host level. Unverified: no real `.bdt`
-has been round-tripped, so "byte-identical apart from the translated text" is
-proven only against our own fixtures (§8.3).
+verbatim — labels are never rewritten because the sigil is not in the IR. A
+translation with a line break, or one starting with `$`/`%` after tabs, is
+refused as a structural change; ids with no home in the original come back as
+`unmatched`. Nine writer tests in `bdt.rs` (13 there in total) plus
+`crates/kintsugi/tests/patch.rs` cover it; no real `.bdt` has been round-tripped
+yet, so byte-identity is proven only against our fixtures (§8.3).
 
 **`indexwww.dat`.** The extractor can export the engine's label index: exactly
 `0xFA0` (4000) records of 16 bytes, `struct.pack('<8sII', name, offset,
@@ -315,8 +312,8 @@ demo's Japanese script, written for this project — so no copyrighted bytes,
 artwork, or text from any commercial title is in the repository. That is also
 why "verified" here means "two independent implementations agree", never "seen
 in a shipped game". The reference copies behind these notes lived under
-`/tmp/kintsugi-research/` (ephemeral); to go further, fetch [GARbro](https://github.com/morkt/GARbro)
-(MIT), whose BlueGale support is under `ArcFormats/BlueGale/` with the bit
-reader at `ArcFormats/BitStream.cs`, and the SExtractor Python extractor
-(`src/extract_BlueGale_bdt.py` in that project). Where a claim is marked
-unconfirmed, the fix is a real game folder plus a measurement — never a guess.
+`/tmp/kintsugi-research/` (ephemeral); to go further, fetch
+[GARbro](https://github.com/morkt/GARbro) (MIT) — BlueGale support under
+`ArcFormats/BlueGale/`, bit reader at `ArcFormats/BitStream.cs` — and the
+SExtractor Python extractor (`src/extract_BlueGale_bdt.py`). Where a claim is
+marked unconfirmed, the fix is a real game folder plus a measurement.
