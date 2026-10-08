@@ -137,7 +137,10 @@ landed" is a measurement. Its `--script FILE` is the patch (`translate
 allowed states and no fourth: empty, **verifiably Kintsugi's own previous
 install** (every file it recorded in `.kintsugi-install` present with the
 recorded size and checksum, and nothing else in the folder), or refused by name
-— a save game, a hand-edited script, or a folder that was never ours.
+— a save game, a hand-edited script, or a folder that was never ours. A copy
+Kintsugi created is removed again if the install does not finish, on any of the
+three platforms, so a failure costs a re-run rather than a folder to delete by
+hand.
 
 The rule is about the folder rather than about one file, because "do not
 overwrite the script you read" still allows `--write-script game/game.snn`, an

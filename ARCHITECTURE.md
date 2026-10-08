@@ -186,7 +186,16 @@ checksums. A copy with a save game in it, or a copy whose script was hand-edited
 is refused by name. So re-running the pipeline after fixing a translation is a
 one-liner rather than a manual `rm -rf`, and the folder is never the thing that
 decides: the manifest is checked against it, not believed.
-The residual hole — a hard link to an original made outside the folder — needs
+
+**An install either finishes or leaves nothing.** The writing half of `install`
+runs inside `writing_into`, which removes a destination Kintsugi itself created
+if the command does not finish — on an error *or* on a panic, because a bug in
+the writing half is exactly the case where a folder that looks like a copy of
+someone's game must not be left on disk for the next run to refuse by name.
+Every line of the report is printed from the finished state, after the copy has
+been mounted and read back, so no success is ever printed before it is true; a
+destination that already held a previous install is left as it was, since its
+manifest still describes it. The residual hole — a hard link to an original made outside the folder — needs
 file identity that portable std does not expose, and is documented rather than
 half-checked.
 
@@ -194,7 +203,11 @@ half-checked.
 copy carries the same list as a file. `.kintsugi-install` is plain
 tab-separated text — path last, so paths with spaces parse — recording the tool
 version, the engine, the game folder, the script, the patch (size, checksum,
-where it came from) and every file written, with its size and checksum. The
+where it came from) and every file written, with its size and checksum. It lists *files*, not
+directories: a directory is the game folder's shape rather than something
+Kintsugi wrote, and its name is spelled with forward slashes on every platform,
+so a copy verified after being carried from one machine to another describes the
+same names. The
 checksum is FNV-1a: it **identifies, it does not authenticate**, which is the
 whole job — noticing that a file is not the one Kintsugi wrote. The host has no
 dependencies, so the format needs none either, and `.kintsugi-install` can be

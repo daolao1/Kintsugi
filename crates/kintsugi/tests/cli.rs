@@ -729,6 +729,121 @@ mod install {
         );
     }
 
+    /// The guarantee that makes a mistake cheap: a destination kintsugi made is
+    /// removed again if the install does not finish, so the folder is either a
+    /// complete repair with a manifest, or it is nothing. Nothing here is about
+    /// the user being careful.
+    #[test]
+    fn a_failed_install_leaves_nothing_behind() {
+        let temp = TempDir::new("install-rollback");
+        let (game, patch) = game_and_patch(&temp, "rollback");
+        let script = game.join("story.bdt");
+        // A read-only script: `fs::copy` carries the permission bits into the
+        // copy, so writing the repair fails *after* the destination exists —
+        // which is the only moment this guarantee is about.
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&script, permissions).unwrap();
+        let copy = temp.0.join("repaired");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+        if output.status.code() == Some(0) {
+            // Running as root, where a read-only file is still writable and the
+            // failure this test provokes cannot happen. CI is not root.
+            return;
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            !copy.exists(),
+            "the failed install left a half-made copy at {}",
+            copy.display()
+        );
+        assert!(
+            stdout(&output).contains("removed the half-made copy"),
+            "the removal must be said out loud, not done quietly: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).contains("story.bdt"),
+            "the error must name the file it could not write: {}",
+            stderr(&output)
+        );
+        // The game folder itself is untouched, read-only script and all.
+        assert!(script.is_file(), "the original script was removed");
+    }
+
+    /// A game folder with a subdirectory in it: the copy must be a copy, and
+    /// the manifest must describe the nested file the way every platform
+    /// spells it (forward slashes), because that string is verified later.
+    #[test]
+    fn a_nested_folder_is_copied_and_recorded() {
+        let temp = TempDir::new("install-nested");
+        let (game, patch) = game_and_patch(&temp, "nested");
+        fs::create_dir_all(game.join("bgm")).unwrap();
+        fs::write(game.join("bgm").join("theme.ogg"), b"not really an ogg").unwrap();
+        let copy = temp.0.join("repaired");
+        let nested = copy.join("bgm").join("theme.ogg");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert_eq!(
+            fs::read(&nested).unwrap(),
+            b"not really an ogg",
+            "the nested file was not copied"
+        );
+
+        let manifest = fs::read_to_string(copy.join(".kintsugi-install")).unwrap();
+        assert!(
+            manifest.contains("\tbgm/theme.ogg\n"),
+            "the manifest must record nested files with forward slashes, on every \
+             platform:\n{manifest}"
+        );
+        // And an unchanged install still verifies, nested file and all: the
+        // check would reject the folder it just wrote if the two spellings
+        // disagreed.
+        let again = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            again.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&again),
+            stderr(&again)
+        );
+    }
+
     /// Both flags are required, and saying which one is missing is the whole
     /// point of a usage error.
     #[test]

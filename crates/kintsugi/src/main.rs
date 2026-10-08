@@ -386,152 +386,250 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     let originals_before = tree_names(Path::new(dir))?;
     let target_bytes_before = std::fs::read(&target_path).ok();
 
-    // The copy. A folder Kintsugi made and nobody has touched since may be
-    // replaced; anything else is someone's folder and stays that way.
+    // Everything that writes happens inside this closure, and every line of
+    // the report is printed after it returns. Two guarantees fall out:
+    //
+    // * a destination Kintsugi created is **removed again** if the install does
+    //   not finish — an error, or a panic from a bug like the one a game with a
+    //   `bgm/` directory found — so the folder either holds a complete repair
+    //   with a manifest, or it holds what it held before (nothing);
+    // * no success is printed before it is true. The report is written from the
+    //   finished state, so a half-installed copy can never be described as a
+    //   repaired one.
+    // The destination's right to be written over, decided before a single byte
+    // is copied into it: absent or empty (ours to create), or a previous
+    // install of ours that nobody has touched since.
     let previous = prepare_destination(&into)?;
-    if let Some(previous) = &previous {
+
+    let installed = writing_into(&previous, &into, || {
+        // A folder Kintsugi made and nobody has touched since may be replaced;
+        // anything else was already refused by `prepare_destination`.
+        if let Some(previous) = &previous {
+            println!(
+                "{}",
+                dim(format!(
+                    "replacing this folder's own previous install ({} file(s), every one \
+                     unchanged since kintsugi wrote it, patch {})",
+                    previous.files.len(),
+                    previous.patch_name()
+                ))
+            );
+        }
+        let (files, bytes, skipped) = copy_tree(Path::new(dir), &into)?;
         println!(
             "{}",
             dim(format!(
-                "replacing this folder's own previous install ({} file(s), every one \
-                 unchanged since kintsugi wrote it, patch {})",
-                previous.files.len(),
-                previous.patch_name()
-            ))
-        );
-    }
-    let (files, bytes, skipped) = copy_tree(Path::new(dir), &into)?;
-    println!(
-        "{}",
-        dim(format!(
-            "copied {files} file(s), {bytes} byte(s), to {}",
-            into.display()
-        ))
-    );
-    for warning in &skipped {
-        println!("{}", dim(format!("  · {warning}")));
-    }
-
-    // The bytes come from the *copy's* own original, through the seam's writer.
-    let copy_vfs = open_game(&into.to_string_lossy())?;
-    let (_, copy_mount) = registry.mount_best(&copy_vfs)?;
-    let written = copy_mount.write_script(&target, &replacements)?;
-    let destination = into.join(target.as_str());
-    std::fs::write(&destination, &written.data)
-        .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
-
-    // Read it back: the copy is mounted again and the script parsed again, so
-    // the report is about the file on disk and not about the bytes in hand.
-    let read_back_vfs = open_game(&into.to_string_lossy())?;
-    let (_, read_back_mount) = registry.mount_best(&read_back_vfs)?;
-    let read_back = read_back_mount.read_script(&target)?;
-    let changed = count_changed_lines(&original, &read_back);
-    let engine = read_back_mount.info().engine.clone();
-    let notes = read_back_mount.info().notes.clone();
-    println!("{}", dim(format!("the copy mounts as {}", gold(&engine))));
-    for note in &notes {
-        println!("{}", dim(format!("  [mount] {note}")));
-    }
-
-    if written.unmatched.is_empty() {
-        println!(
-            "installed {} into the copy: {} of {} line(s) differ from the original",
-            gold(target.as_str()),
-            changed,
-            original.commands.len()
-        );
-    } else {
-        println!(
-            "installed {} into the copy: {} of {} line(s) differ from the original",
-            gold(target.as_str()),
-            changed,
-            original.commands.len()
-        );
-        let ids: Vec<String> = written
-            .unmatched
-            .iter()
-            .take(8)
-            .map(usize::to_string)
-            .collect();
-        let more = if written.unmatched.len() > 8 {
-            format!(" and {} more", written.unmatched.len() - 8)
-        } else {
-            String::new()
-        };
-        println!(
-            "{}",
-            dim(format!(
-                "  · {} line(s) of the patch have no line in this game to land on \
-                 (ids: {}{more})",
-                written.unmatched.len(),
-                ids.join(", ")
-            ))
-        );
-    }
-
-    // The verification that matters: the file on disk reads back as the patch
-    // said it would, and the game it came from is byte-for-byte what it was.
-    if changed != replacements.len() {
-        return Err(Failure::Engine(Error::unsupported(
-            "install",
-            format!(
-                "the copy does not read back as the patch wrote it: {changed} line(s) \
-                 differ, but {} replacement(s) were applied — the copy at {} is not \
-                 what this command claimed to write",
-                replacements.len(),
+                "copied {files} file(s), {bytes} byte(s), to {}",
                 into.display()
-            ),
-        )));
-    }
-    let originals_after = tree_names(Path::new(dir))?;
-    let target_bytes_after = std::fs::read(&target_path).ok();
-    if originals_before != originals_after || target_bytes_before != target_bytes_after {
-        return Err(Failure::Engine(Error::unsupported(
-            "install",
-            format!(
-                "the game folder changed while installing a repair: {} was modified or \
-                 gained a file. Nothing in this command writes there, so this is a bug \
-                 — stop and report it rather than playing the game",
-                dir
-            ),
-        )));
-    }
-    println!(
-        "{}",
-        dim(format!(
-            "the original game folder is untouched ({} file(s), '{}' byte-identical)",
-            originals_after.len(),
-            target.as_str()
-        ))
-    );
-    // What was written, in a file inside the copy: the seam list made
-    // readable, and the thing that lets a second install recognise its own
-    // work instead of asking a human to delete a folder by hand.
-    let manifest = InstallManifest {
-        tool: env!("CARGO_PKG_VERSION").to_string(),
-        engine: engine.clone(),
-        game: absolute(Path::new(dir)),
-        script: target.as_str().to_string(),
-        patch_size: patch_bytes.len() as u64,
-        patch_checksum: fnv1a(&patch_bytes),
-        patch_path: absolute(&patch_path),
-        files: Vec::new(),
-    };
-    let manifest = manifest.recording(&into, &previous)?;
-    manifest.write(&into)?;
+            ))
+        );
+        for warning in &skipped {
+            println!("{}", dim(format!("  · {warning}")));
+        }
 
-    println!(
-        "→ play the repaired copy: {}",
-        dim(format!("kintsugi play {} --auto", into.display()))
-    );
-    println!(
-        "{}",
-        dim(format!(
-            "wrote {}: what this copy is, and every file kintsugi put in it",
-            INSTALL_MANIFEST
-        ))
-    );
+        // The bytes come from the *copy's* own original, through the seam's
+        // writer.
+        let copy_vfs = open_game(&into.to_string_lossy())?;
+        let (_, copy_mount) = registry.mount_best(&copy_vfs)?;
+        let written = copy_mount.write_script(&target, &replacements)?;
+        let destination = into.join(target.as_str());
+        std::fs::write(&destination, &written.data)
+            .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
+
+        // Read it back: the copy is mounted again and the script parsed again,
+        // so the report is about the file on disk and not about the bytes in
+        // hand.
+        let read_back_vfs = open_game(&into.to_string_lossy())?;
+        let (_, read_back_mount) = registry.mount_best(&read_back_vfs)?;
+        let read_back = read_back_mount.read_script(&target)?;
+        let changed = count_changed_lines(&original, &read_back);
+        if changed != replacements.len() {
+            return Err(Error::unsupported(
+                "install",
+                format!(
+                    "the copy does not read back as the patch wrote it: {changed} line(s) \
+                     differ, but {} replacement(s) were applied — the copy at {} is not \
+                     what this command claimed to write",
+                    replacements.len(),
+                    into.display()
+                ),
+            ));
+        }
+
+        // The game it came from is byte-for-byte what it was. Nothing in this
+        // command writes there, so this is a check on the tool itself.
+        let originals_after = tree_names(Path::new(dir))?;
+        let target_bytes_after = std::fs::read(&target_path).ok();
+        if originals_before != originals_after || target_bytes_before != target_bytes_after {
+            return Err(Error::unsupported(
+                "install",
+                format!(
+                    "the game folder changed while installing a repair: {} was modified or \
+                     gained a file. Nothing in this command writes there, so this is a bug \
+                     — stop and report it rather than playing the game",
+                    dir
+                ),
+            ));
+        }
+
+        // And the record of what was done goes in last, so that a manifest
+        // that exists always describes a finished install.
+        let manifest = InstallManifest {
+            tool: env!("CARGO_PKG_VERSION").to_string(),
+            engine: read_back_mount.info().engine.clone(),
+            game: absolute(Path::new(dir)),
+            script: target.as_str().to_string(),
+            patch_size: patch_bytes.len() as u64,
+            patch_checksum: fnv1a(&patch_bytes),
+            patch_path: absolute(&patch_path),
+            files: Vec::new(),
+        };
+        manifest.recording(&into, &previous)?.write(&into)?;
+
+        Ok(Installed {
+            engine: read_back_mount.info().engine.clone(),
+            notes: read_back_mount.info().notes.clone(),
+            files,
+            bytes,
+            script: target.as_str().to_string(),
+            changed,
+            total: original.commands.len(),
+            unmatched: written.unmatched.clone(),
+            originals: originals_after.len(),
+            copy: into.clone(),
+        })
+    })?;
+
+    installed.report();
     Ok(())
+}
+
+/// What a finished install did, so that the report can be printed from the
+/// finished state rather than assembled while writing.
+struct Installed {
+    engine: String,
+    notes: Vec<String>,
+    files: usize,
+    bytes: u64,
+    script: String,
+    changed: usize,
+    total: usize,
+    unmatched: Vec<usize>,
+    originals: usize,
+    copy: PathBuf,
+}
+
+impl Installed {
+    fn report(&self) {
+        let _ = (self.files, self.bytes);
+        println!(
+            "{}",
+            dim(format!("the copy mounts as {}", gold(&self.engine)))
+        );
+        for note in &self.notes {
+            println!("{}", dim(format!("  [mount] {note}")));
+        }
+        println!(
+            "installed {} into the copy: {} of {} line(s) differ from the original",
+            gold(self.script.as_str()),
+            self.changed,
+            self.total
+        );
+        if !self.unmatched.is_empty() {
+            let ids: Vec<String> = self
+                .unmatched
+                .iter()
+                .take(8)
+                .map(usize::to_string)
+                .collect();
+            let more = if self.unmatched.len() > 8 {
+                format!(" and {} more", self.unmatched.len() - 8)
+            } else {
+                String::new()
+            };
+            println!(
+                "{}",
+                dim(format!(
+                    "  · {} line(s) of the patch have no line in this game to land on \
+                     (ids: {}{more})",
+                    self.unmatched.len(),
+                    ids.join(", ")
+                ))
+            );
+        }
+        println!(
+            "{}",
+            dim(format!(
+                "the original game folder is untouched ({} file(s), '{}' byte-identical)",
+                self.originals, self.script
+            ))
+        );
+        println!(
+            "→ play the repaired copy: {}",
+            dim(format!("kintsugi play {} --auto", self.copy.display()))
+        );
+        println!(
+            "{}",
+            dim(format!(
+                "wrote {}: what this copy is, and every file kintsugi put in it",
+                INSTALL_MANIFEST
+            ))
+        );
+    }
+}
+
+/// Run the writing half of an install, and undo a destination this command
+/// created if it does not finish.
+///
+/// Catches panics as well as errors on purpose: the writing half is where a bug
+/// would otherwise leave a folder that looks like a copy of someone's game and
+/// is not a repair — and the next install would then refuse it by name, asking
+/// the user to delete a folder they did not create. A destination that already
+/// held a previous install is left as it was; its manifest still describes it,
+/// and the refusal says so.
+fn writing_into<T>(
+    previous: &Option<InstallManifest>,
+    into: &Path,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let created_here = previous.is_none();
+    let undo = |into: &Path| {
+        if created_here {
+            // Say it out loud. A folder that was there a moment ago and is gone
+            // now is exactly the kind of silence this project does not do — and
+            // the user is about to re-run the command, so they should know the
+            // destination is free again.
+            match std::fs::remove_dir_all(into) {
+                Ok(()) => println!(
+                    "{}",
+                    dim(format!(
+                        "removed the half-made copy at {}: an install either finishes or \
+                         leaves nothing",
+                        into.display()
+                    ))
+                ),
+                Err(e) => println!(
+                    "{}",
+                    dim(format!(
+                        "could not remove the half-made copy at {}: {e} — delete it before \
+                         installing again",
+                        into.display()
+                    ))
+                ),
+            }
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => {
+            undo(into);
+            Err(e)
+        }
+        Err(payload) => {
+            undo(into);
+            std::panic::resume_unwind(payload)
+        }
+    }
 }
 
 /// The words of a line — the part a translation may replace — or `None` when
@@ -585,11 +683,16 @@ fn tree_names(root: &Path) -> Result<Vec<String>> {
         for entry in entries {
             let entry = entry.map_err(|e| Error::Io(format!("reading {}: {e}", dir.display())))?;
             let path = entry.path();
+            // Forward slashes, always: a `.kintsugi-install` written on
+            // Windows and verified after copying the folder to a Mac must
+            // describe the same names, and this string is written into that
+            // file. Case is left alone on purpose — on a case-sensitive
+            // filesystem `README.TXT` and `readme.txt` are two files.
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .into_owned();
+                .replace('\\', "/");
             names.push(relative);
             if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 stack.push(path);
@@ -650,8 +753,16 @@ impl InstallManifest {
         names.retain(|name| name != INSTALL_MANIFEST);
         let mut files = Vec::new();
         for name in &names {
-            let bytes = std::fs::read(into.join(name))
-                .map_err(|e| Error::Io(format!("reading {}: {e}", into.join(name).display())))?;
+            let path = into.join(name);
+            if path.is_dir() {
+                // The manifest lists *files*. A directory is structure, the
+                // game folder's shape rather than something kintsugi wrote, and
+                // `fs::read` on one is an error on every platform — which is
+                // how a game with a `bgm/` in it found this.
+                continue;
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|e| Error::Io(format!("reading {}: {e}", path.display())))?;
             files.push((name.clone(), bytes.len() as u64, fnv1a(&bytes)));
         }
         if let Some(previous) = previous {
@@ -852,7 +963,16 @@ fn prepare_destination(into: &Path) -> Result<Option<InstallManifest>> {
     let recorded: HashSet<&str> = previous.files.iter().map(|(n, _, _)| n.as_str()).collect();
     let mut foreign: Vec<String> = existing
         .iter()
-        .filter(|name| name.as_str() != INSTALL_MANIFEST && !recorded.contains(name.as_str()))
+        .filter(|name| {
+            name.as_str() != INSTALL_MANIFEST
+                && !recorded.contains(name.as_str())
+                // Directories are not foreign. They are implied by the files
+                // inside them, and writing over this folder neither removes nor
+                // changes one, so an extra empty directory costs the user
+                // nothing. A directory holding anything they added is caught
+                // through that file, by name.
+                && !into.join(name.as_str()).is_dir()
+        })
         .cloned()
         .collect();
     let mut changed: Vec<String> = Vec::new();
@@ -892,7 +1012,9 @@ fn occupied<'a>(names: impl Iterator<Item = &'a str>) -> Error {
             "the destination already holds {} thing(s) kintsugi did not write or that \
              changed after it did ({}{more}); refusing to write a repaired copy over \
              them — point --into at a new folder, or delete that folder yourself if \
-             those files do not matter",
+             those files do not matter. If kintsugi itself was interrupted partway \
+             through a previous install, that folder is a partial copy and deleting \
+             it is the whole repair",
             names.len(),
             shown.join(", ")
         ),

@@ -40,7 +40,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
 | **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
-| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, reading the copy back to prove it landed, and recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf` | working |
+| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, reading the copy back to prove it landed, recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf`, and removing a copy it made if the install does not finish — an install either finishes or leaves nothing | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam contract**: `kintsugi-testkit` — a new engine runs the same checks BlueGale does (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, and tested against eight deliberately broken seams |
