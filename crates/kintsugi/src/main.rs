@@ -4,8 +4,6 @@
 //! in), then plays, inspects, upscales, and translates repaired games.
 //! No arguments prints the usage; start with `kintsugi demo`.
 
-mod player;
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -162,8 +160,7 @@ impl Args {
         "write-script",
         "into",
         "as",
-        "html",
-        "gallery",
+        "batch-size",
     ];
 
     /// Boolean flags, listed so a typo gets reported instead of ignored.
@@ -188,7 +185,7 @@ impl Args {
         ("demo", &["dir"], &["auto", "no-play"]),
         ("detect", &[], &[]),
         ("inspect", &["script", "as"], &[]),
-        ("play", &["as", "script", "html", "gallery"], &["auto"]),
+        ("play", &["as", "script"], &["auto"]),
         ("upscale", &["asset", "method", "factor", "output"], &[]),
         ("interpolate", &["asset", "factor", "output"], &[]),
         (
@@ -204,6 +201,7 @@ impl Args {
                 "api-base",
                 "api-key",
                 "model",
+                "batch-size",
             ],
             &["mock", "only-typed", "no-play", "auto"],
         ),
@@ -1721,141 +1719,9 @@ fn cmd_play(args: &[String]) -> std::result::Result<(), Failure> {
     for warning in &script.warnings {
         println!("{}", dim(format!("  [warn] {warning}")));
     }
-    // `--html` turns the playthrough into a file a browser can read. It is
-    // still the same story the terminal would have printed: the seam read the
-    // script once, and the two hosts only differ in where the lines go.
-    if let Some(out) = args.flag("html") {
-        let output = PathBuf::from(out);
-        ensure_outside_game(Path::new(dir), &output, "the player")?;
-        let pictures = match args.flag("gallery") {
-            Some(folder) => write_gallery(mount.as_ref(), &output, folder, Path::new(dir))?,
-            None => Vec::new(),
-        };
-        let game = Path::new(dir)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dir.to_string());
-        let written = player::write_player(
-            &output,
-            &script,
-            &player::Player {
-                game: &game,
-                engine: mount.info().engine.as_str(),
-                source: script.source.as_str(),
-                pictures: &pictures,
-            },
-        )?;
-        println!(
-            "{} {} line(s) → {}",
-            gold("player:"),
-            written,
-            output.display()
-        );
-        if !pictures.is_empty() {
-            println!(
-                "{}",
-                dim(format!(
-                    "  · {} picture(s) beside it, in the game's own order",
-                    pictures.len()
-                ))
-            );
-        }
-        println!(
-            "{}",
-            dim("  · open it in any browser; the game folder was not written to")
-        );
-        return Ok(());
-    }
-
     let mut host = TerminalHost::new(args.on("auto"));
     Interpreter::new(script).run(&mut host)?;
     Ok(())
-}
-
-/// Put the pictures under `folder` beside the player, and say where each one is.
-///
-/// The folder is named by the person running the command, not guessed by the
-/// engine: which folder of pictures is worth showing is a question about the
-/// game, and a seam that answered it would be claiming to know what the code
-/// does with them. The pictures are written at their own size — the glazer is a
-/// separate command with its own factor, and a player that silently resampled
-/// the game's art would be putting its own taste between the reader and the
-/// original.
-fn write_gallery(
-    mount: &dyn EngineMount,
-    player_path: &Path,
-    folder: &str,
-    game_dir: &Path,
-) -> std::result::Result<Vec<player::Picture>, Failure> {
-    // `.` is how a person says "the whole game": a game whose pictures sit at
-    // the top of its archive has no folder to name, and a gallery that found
-    // nothing there would be refusing the simplest case.
-    let folder = folder.trim().trim_matches('/');
-    let prefix = match folder {
-        "" | "." => String::new(),
-        folder => format!("{}/", folder.to_lowercase()),
-    };
-    let names: Vec<String> = discover_images(mount)
-        .into_iter()
-        .filter(|path| path.starts_with(&prefix))
-        .collect();
-    if names.is_empty() {
-        return Err(Failure::Usage(format!(
-            "no readable picture under '{folder}' in this game; `kintsugi upscale {dir}`              lists every picture the seam claims",
-            dir = game_dir.display()
-        )));
-    }
-
-    // `story.html` keeps its pictures in `story-cg/`, so the page finds them
-    // without a server and without absolute paths: a folder of the two can be
-    // copied anywhere, or zipped and opened on a phone.
-    let stem = player_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "kintsugi".to_string());
-    let directory_name = format!("{stem}-cg");
-    let directory = player_path.with_file_name(&directory_name);
-    ensure_outside_game(game_dir, &directory, "the player's pictures")?;
-    std::fs::create_dir_all(&directory)
-        .map_err(|e| Error::Io(format!("creating {}: {e}", directory.display())))?;
-
-    let mut pictures = Vec::new();
-    for (index, name) in names.iter().enumerate() {
-        let image = mount.read_image(&VirtualPath::new(name))?;
-        let png = encode_png(&image)?;
-        // Numbered as well as named: two files in one archive can share a
-        // stem, and a gallery that overwrote one with the other would be
-        // showing fewer pictures than the game has.
-        let file = format!("{:03}-{}.png", index + 1, file_stem(name));
-        std::fs::write(directory.join(&file), &png)
-            .map_err(|e| Error::Io(format!("writing {}: {e}", directory.join(&file).display())))?;
-        pictures.push(player::Picture {
-            name: name.clone(),
-            file: format!("{directory_name}/{file}"),
-        });
-    }
-    Ok(pictures)
-}
-
-/// The last path segment's stem, with anything that is not safe in a file name
-/// replaced. Picture names come from a 2008 archive index.
-fn file_stem(path: &str) -> String {
-    let stem = path
-        .rsplit('/')
-        .next()
-        .unwrap_or(path)
-        .rsplit_once('.')
-        .map(|(stem, _)| stem)
-        .unwrap_or(path);
-    stem.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
@@ -2110,6 +1976,19 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
             .or_else(|| std::env::var("KINTSUGI_MODEL").ok())
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
         let mut llm = LlmTranslator::new(api_base, api_key, model);
+        if let Some(size) = args.flag("batch-size") {
+            let size: usize = size.parse().map_err(|_| {
+                Failure::Usage(format!(
+                    "--batch-size takes a number of lines, not '{size}'"
+                ))
+            })?;
+            if size == 0 {
+                return Err(Failure::Usage(
+                    "--batch-size 0 would send nothing; the smallest batch is 1 line".to_string(),
+                ));
+            }
+            llm = llm.with_batch_size(size);
+        }
         if let Some(path) = args.flag("glossary") {
             llm = llm.with_glossary(load_glossary(Path::new(path))?);
         }
@@ -2353,10 +2232,7 @@ fn usage_text() -> String {
         "        Detection verdicts, mounted archives, files, script preview.",
     );
     line(&mut text, "");
-    line(
-        &mut text,
-        "  kintsugi play <DIR> [--script PATH] [--auto] [--html FILE]",
-    );
+    line(&mut text, "  kintsugi play <DIR> [--script PATH] [--auto]");
     line(
         &mut text,
         "        Mount the best-matching engine and play a script in the",
@@ -2376,30 +2252,6 @@ fn usage_text() -> String {
     line(
         &mut text,
         "        and no obvious main one is a question only you can settle.",
-    );
-    line(
-        &mut text,
-        "        --html FILE writes the same story as one offline page that",
-    );
-    line(
-        &mut text,
-        "        any browser opens: arrow keys turn the lines, and the marks",
-    );
-    line(
-        &mut text,
-        "        of what the seam could not classify stay on them. --gallery",
-    );
-    line(
-        &mut text,
-        "        FOLDER puts the pictures under that folder of the game",
-    );
-    line(
-        &mut text,
-        "        (e.g. --gallery graphics/bg) beside the page, at their own",
-    );
-    line(
-        &mut text,
-        "        size; the page does not claim which line shows which one.",
     );
     line(&mut text, "");
     line(
@@ -2428,7 +2280,7 @@ fn usage_text() -> String {
         every image the engine decodes, in name order, unless
         --asset names one.
 
-  kintsugi translate <DIR> [options]",
+  kintsugi translate <DIR> [options] [--batch-size N]",
     );
     line(
         &mut text,
@@ -2451,6 +2303,11 @@ fn usage_text() -> String {
     line(
         &mut text,
         "          --model M            default gpt-4o-mini",
+    );
+    line(
+        &mut text,
+        "          --batch-size N       lines per request, default 40. Smaller
+                               batches survive a slow or strict gateway",
     );
     line(
         &mut text,
