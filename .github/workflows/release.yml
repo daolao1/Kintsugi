@@ -104,12 +104,26 @@ jobs:
       - name: smoke test the built binary
         run: scripts/smoke.sh ./target/kintsugi-macos-universal
 
+      - name: build the desktop shell, both architectures
+        run: |
+          set -euo pipefail
+          cargo build --release -p kintsugi-desktop --target aarch64-apple-darwin
+          cargo build --release -p kintsugi-desktop --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/kintsugi-desktop \
+            target/x86_64-apple-darwin/release/kintsugi-desktop \
+            -output target/kintsugi-desktop-macos-universal
+
+      - name: smoke test the desktop shell
+        run: scripts/smoke-desktop.sh ./target/kintsugi-desktop-macos-universal
+
       - name: package
         run: |
           set -euo pipefail
           mkdir -p dist
           cp target/kintsugi-macos-universal dist/kintsugi
-          tar -czf kintsugi-macos-universal.tar.gz -C dist kintsugi
+          cp target/kintsugi-desktop-macos-universal dist/kintsugi-desktop
+          tar -czf kintsugi-macos-universal.tar.gz -C dist kintsugi kintsugi-desktop
           shasum -a 256 kintsugi-macos-universal.tar.gz | tee kintsugi-macos-universal.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
@@ -131,7 +145,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: build
-        run: cargo build --release -p kintsugi --target x86_64-pc-windows-msvc
+        run: |
+          cargo build --release -p kintsugi --target x86_64-pc-windows-msvc
+          cargo build --release -p kintsugi-desktop --target x86_64-pc-windows-msvc
 
       - name: cargo test
         run: cargo test --workspace --all-features
@@ -143,12 +159,17 @@ jobs:
         shell: bash
         run: scripts/smoke.sh target/x86_64-pc-windows-msvc/release/kintsugi.exe "$RUNNER_TEMP/kintsugi-smoke"
 
+      - name: smoke test the desktop shell
+        shell: bash
+        run: scripts/smoke-desktop.sh target/x86_64-pc-windows-msvc/release/kintsugi-desktop.exe "$RUNNER_TEMP/kintsugi-desktop-smoke"
+
       - name: package
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/kintsugi.exe dist/
+          cp target/x86_64-pc-windows-msvc/release/kintsugi-desktop.exe dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
           7z a kintsugi-windows-x86_64.zip ./dist/* > /dev/null
           sha256sum kintsugi-windows-x86_64.zip | tee kintsugi-windows-x86_64.zip.sha256
@@ -168,17 +189,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # The windowing crates load what they can at runtime; the headers make
+      # sure the build never depends on which dlopen path a runner image has.
+      - name: windowing libraries the build links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
       - name: build
-        run: cargo build --release -p kintsugi
+        run: |
+          cargo build --release -p kintsugi
+          cargo build --release -p kintsugi-desktop
 
       - name: smoke test the built binary
         run: scripts/smoke.sh ./target/release/kintsugi
+
+      - name: smoke test the desktop shell
+        run: scripts/smoke-desktop.sh ./target/release/kintsugi-desktop
 
       - name: package
         run: |
           set -euo pipefail
           mkdir -p dist
           cp target/release/kintsugi dist/
+          cp target/release/kintsugi-desktop dist/
           tar -czf kintsugi-linux-x86_64.tar.gz -C dist kintsugi
           sha256sum kintsugi-linux-x86_64.tar.gz | tee kintsugi-linux-x86_64.tar.gz.sha256
 
