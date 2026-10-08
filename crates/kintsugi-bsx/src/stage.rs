@@ -517,6 +517,7 @@ pub fn emit(
             program.name.as_deref(),
         )));
         let mut offers: Vec<ChoiceOption> = Vec::new();
+        let mut offer_lines: Vec<usize> = Vec::new();
         for anchor in &all_anchors[position] {
             match *anchor {
                 Anchor::Show { channel, line, .. } => {
@@ -567,6 +568,7 @@ pub fn emit(
                         .iter()
                         .find(|p| p.index == target)
                         .and_then(|p| p.name.as_deref());
+                    offer_lines.push(label_line);
                     offers.push(ChoiceOption {
                         label,
                         goto: program_label(target, name),
@@ -574,6 +576,13 @@ pub fn emit(
                 }
                 Anchor::OfferListEnd { .. } => {
                     if !offers.is_empty() {
+                        // The labels are story lines too: offered to the
+                        // translator under the choice command's own
+                        // position, one entry per option, in order.
+                        let position = commands.len();
+                        for line in offer_lines.drain(..) {
+                            text.push((position, line));
+                        }
                         commands.push(Command::Choice(std::mem::take(&mut offers)));
                     }
                 }
@@ -843,12 +852,25 @@ mod tests {
                 .any(|c| matches!(c, Command::RawLine(text) if text == "never shown")),
             "the unshown line is kept"
         );
-        // And the text map still names every command a translation may move.
+        // And the text map still names every command a translation may move:
+        // five shown, one kept, and the two labels under their choice's id.
         let lines: Vec<usize> = emission.text.iter().map(|(_, line)| *line).collect();
+        assert_eq!(lines.len(), 8, "five shown, one kept, two choice labels");
+        let choice = emission
+            .commands
+            .iter()
+            .position(|c| matches!(c, Command::Choice(_)))
+            .expect("the choice is a command");
+        let label_entries: Vec<usize> = emission
+            .text
+            .iter()
+            .filter(|(position, _)| *position == choice)
+            .map(|(_, line)| *line)
+            .collect();
         assert_eq!(
-            lines.len(),
-            6,
-            "five shown, one kept; the labels are not shown text"
+            label_entries.len(),
+            2,
+            "both labels are offered under the choice's own position"
         );
     }
 }

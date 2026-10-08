@@ -46,6 +46,17 @@ pub fn extract(script: &Script) -> Vec<TranslationEntry> {
                 speaker: speaker.clone(),
                 text: text.clone(),
             }),
+            // A choice's labels are one entry, joined with newlines; the
+            // repair side splits them back one per option, in order.
+            Command::Choice(options) if !options.is_empty() => Some(TranslationEntry {
+                id,
+                speaker: None,
+                text: options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
             _ => None,
         })
         .collect()
@@ -74,6 +85,17 @@ pub fn extract_with_raw(script: &Script) -> Vec<TranslationEntry> {
                 id,
                 speaker: speaker.clone(),
                 text: text.clone(),
+            }),
+            // A choice's labels are one entry, joined with newlines; the
+            // repair side splits them back one per option, in order.
+            Command::Choice(options) if !options.is_empty() => Some(TranslationEntry {
+                id,
+                speaker: None,
+                text: options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             }),
             _ => None,
         })
@@ -111,6 +133,26 @@ pub fn apply(script: &Script, entries: &[TranslationEntry]) -> Result<Script> {
             Some(Command::RawLine(text)) => {
                 *text = entry.text.clone();
                 applied += 1;
+            }
+            Some(Command::Choice(options)) => {
+                let parts: Vec<&str> = entry.text.split('\n').collect();
+                if parts.len() != options.len() {
+                    // One label per line, in order — a translation that
+                    // joined or split them is refused, not guessed at.
+                    skipped += 1;
+                    out.warnings.push(format!(
+                        "translation id {} is a choice of {} option(s) but the text has {} \
+                         line(s); left in the original language",
+                        entry.id,
+                        options.len(),
+                        parts.len()
+                    ));
+                } else {
+                    for (option, label) in options.iter_mut().zip(parts) {
+                        option.label = label.to_string();
+                    }
+                    applied += 1;
+                }
             }
             Some(_) => {
                 skipped += 1;
@@ -214,6 +256,70 @@ mod tests {
             Command::RawLine("SND_PLAY ro-mon.ogg".into()),
         ];
         script
+    }
+
+    fn with_choice() -> Script {
+        let mut script = sample();
+        script.commands.push(Command::Choice(vec![
+            kintsugi_core::script::ChoiceOption {
+                label: "直す".into(),
+                goto: "fix".into(),
+            },
+            kintsugi_core::script::ChoiceOption {
+                label: "直さない".into(),
+                goto: "leave".into(),
+            },
+        ]));
+        script
+    }
+
+    #[test]
+    fn a_choice_is_one_entry_of_joined_labels_and_applies_back() {
+        let entries = extract_with_raw(&with_choice());
+        let choice = entries.iter().find(|entry| entry.id == 4).expect("choice");
+        assert_eq!(choice.text, "直す\n直さない");
+
+        let translated = apply(
+            &with_choice(),
+            &[TranslationEntry {
+                id: 4,
+                speaker: None,
+                text: "Repair it\nLeave it".to_string(),
+            }],
+        )
+        .expect("apply");
+        let Command::Choice(options) = &translated.commands[4] else {
+            panic!("command 4 is the choice");
+        };
+        assert_eq!(options[0].label, "Repair it");
+        assert_eq!(options[1].label, "Leave it");
+        // The route the label names never changes hands.
+        assert_eq!(options[0].goto, "fix");
+    }
+
+    #[test]
+    fn a_misjoined_choice_is_refused_not_guessed() {
+        let translated = apply(
+            &with_choice(),
+            &[TranslationEntry {
+                id: 4,
+                speaker: None,
+                text: "Repair it, or don't".to_string(),
+            }],
+        )
+        .expect("apply");
+        let Command::Choice(options) = &translated.commands[4] else {
+            panic!("command 4 is the choice");
+        };
+        assert_eq!(options[0].label, "直す", "a misjoined label stays original");
+        assert!(
+            translated
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("choice of 2 option(s)")),
+            "the refusal says why: {:?}",
+            translated.warnings
+        );
     }
 
     #[test]

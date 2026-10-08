@@ -373,4 +373,34 @@ fn a_staged_story_plays_with_its_scenery_and_repairs_by_id() {
     let reread = kintsugi_bsx::Story::parse(&written.script).expect("a repair is a story");
     assert_eq!(reread.strings()[0], "第零行");
     assert_eq!(reread.strings()[3], "line three", "no other line moves");
+
+    // A choice's labels repair through the choice command's own id: one
+    // text, one label per line, in order.
+    let choice_id = script
+        .commands
+        .iter()
+        .position(|c| matches!(c, Command::Choice(_)))
+        .expect("the choice is a command");
+    let label_lines: Vec<usize> = (0..reread.strings().len())
+        .filter(|&line| reread.strings()[line].starts_with("pick the"))
+        .collect();
+    assert_eq!(label_lines.len(), 2, "the fixture offers two labels");
+    let replacements =
+        std::collections::BTreeMap::from([(choice_id, String::from("一つ目を選ぶ\n二つ目を選ぶ"))]);
+    let written = mount
+        .write_script(&path, &replacements)
+        .expect("the choice repair writes");
+    assert_eq!(written.replaced, 2, "both label lines move");
+    let reread = kintsugi_bsx::Story::parse(&written.script).expect("a repair is a story");
+    assert_eq!(reread.strings()[label_lines[0]], "一つ目を選ぶ");
+    assert_eq!(reread.strings()[label_lines[1]], "二つ目を選ぶ");
+
+    // A translation that joined the labels into one line is refused, not
+    // guessed at.
+    let replacements =
+        std::collections::BTreeMap::from([(choice_id, String::from("一つにまとめる"))]);
+    let error = mount
+        .write_script(&path, &replacements)
+        .expect_err("a misjoined choice cannot be placed");
+    assert!(error.to_string().contains("one label per line"), "{error}");
 }

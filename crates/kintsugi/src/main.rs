@@ -442,10 +442,10 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
         let Some(after) = patched.commands.get(id) else {
             continue;
         };
-        match (line_text(before), line_text(after)) {
+        match (command_text(before), command_text(after)) {
             (Some(before), Some(after)) => {
                 if before != after {
-                    replacements.insert(id, after.to_string());
+                    replacements.insert(id, after.into_owned());
                 }
             }
             (None, Some(_)) => misfits.push(format!(
@@ -763,6 +763,22 @@ fn line_text(command: &Command) -> Option<&str> {
     }
 }
 
+/// The translatable text of any command: prose as itself, a choice as its
+/// labels joined with newlines — the shape `translate` extracts and
+/// `write-script` splits back, one label per line, in order.
+fn command_text(command: &Command) -> Option<std::borrow::Cow<'_, str>> {
+    match command {
+        Command::Choice(options) if !options.is_empty() => Some(std::borrow::Cow::Owned(
+            options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )),
+        _ => line_text(command).map(std::borrow::Cow::Borrowed),
+    }
+}
+
 /// What a line is, for a refusal a human can act on.
 fn line_kind(command: &Command) -> &'static str {
     match command {
@@ -784,8 +800,8 @@ fn count_changed_lines(before: &Script, after: &Script) -> usize {
         .iter()
         .enumerate()
         .filter(|(id, command)| match after.commands.get(*id) {
-            Some(after) => line_text(command) != line_text(after),
-            None => line_text(command).is_some(),
+            Some(after) => command_text(command) != command_text(after),
+            None => command_text(command).is_some(),
         })
         .count()
 }

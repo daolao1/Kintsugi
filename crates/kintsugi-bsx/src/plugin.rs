@@ -426,21 +426,58 @@ impl EngineMount for BsxMount {
         // back into the line a repair can move. A story is read the same way
         // twice, which is what makes a repair land on the words it names.
         let plan = self.plan(&story);
-        let line_of: BTreeMap<usize, usize> = plan.text.iter().copied().collect();
+        // A plain line id names one story line; a choice id names every
+        // label it offers, in order, and the translation carries them as
+        // one text joined with newlines.
+        let mut line_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (position, line) in &plan.text {
+            line_of.entry(*position).or_default().push(*line);
+        }
         let mut wanted: BTreeMap<usize, String> = BTreeMap::new();
         let mut unmatched = Vec::new();
         let mut clashes = Vec::new();
+        let mut misjoined = Vec::new();
         for (id, text) in replacements {
-            let Some(line) = line_of.get(id).copied() else {
+            let Some(lines) = line_of.get(id) else {
                 unmatched.push(*id);
                 continue;
             };
-            match wanted.get(&line) {
-                Some(existing) if existing != text => clashes.push((*id, line)),
-                _ => {
-                    wanted.insert(line, text.clone());
+            let parts: Vec<&str> = if lines.len() > 1 {
+                let parts: Vec<&str> = text.split('\n').collect();
+                if parts.len() != lines.len() {
+                    // A choice's labels must come back one per line; a
+                    // translation that joined or split them cannot be
+                    // placed, and guessing which label moved is worse.
+                    misjoined.push(*id);
+                    continue;
+                }
+                parts
+            } else {
+                vec![text.as_str()]
+            };
+            for (line, part) in lines.iter().zip(parts) {
+                match wanted.get(line) {
+                    Some(existing) if existing != part => clashes.push((*id, *line)),
+                    _ => {
+                        wanted.insert(*line, part.to_string());
+                    }
                 }
             }
+        }
+        if !misjoined.is_empty() {
+            return Err(Error::Script {
+                context: format!("'{path}'"),
+                detail: format!(
+                    "choice label(s) at command(s) {} came back with a different number of lines \
+                     than the choice offers — one label per line, in order, is the contract; \
+                     refusing rather than guess which label moved",
+                    misjoined
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
         }
         if !clashes.is_empty() {
             // One line shown in two scenes is one string in the file. A
@@ -547,7 +584,8 @@ impl BsxMount {
              Programs that close with a forward call are followed where they point; the rest \
              play in file order — the endings and replays the release only reaches on its own \
              terms play straight through here — so this is every program walked once, not one \
-             playthrough. Choice labels are shown but not yet offered to the translator.{}",
+             playthrough. Choice labels are story lines too, and the translator is offered \
+             them under the choice's own command id, one label per line.{}",
             programs.len(),
             if notes.is_empty() {
                 String::new()
