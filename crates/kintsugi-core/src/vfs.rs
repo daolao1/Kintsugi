@@ -6,13 +6,13 @@
 //! dumped the game into; the untouched files stay byte-for-byte intact on
 //! disk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::{Error, Result};
 
@@ -214,15 +214,27 @@ impl FileSource for MemorySource {
 }
 
 /// Serves files from a real directory tree, read-only.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DirectorySource {
     root: PathBuf,
+    /// Every file in the tree, under the virtual path that names it.
+    ///
+    /// A virtual path is lower-cased, but a directory is not: a game extracted
+    /// on Linux keeps whatever case the disc used, so `Graphics.bsa` on disk is
+    /// `graphics.bsa` to the body, and building a real path by joining the two
+    /// together finds nothing on a case-sensitive filesystem while happening to
+    /// work on macOS. The index is what makes a lookup behave the same on all
+    /// of them, and it is built once, on first use.
+    index: OnceLock<HashMap<VirtualPath, PathBuf>>,
 }
 
 impl DirectorySource {
     /// Serve the tree rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            index: OnceLock::new(),
+        }
     }
 
     /// The real directory backing this source.
@@ -230,23 +242,24 @@ impl DirectorySource {
         &self.root
     }
 
-    fn resolve(&self, path: &VirtualPath) -> Result<PathBuf> {
-        for component in path.components() {
-            if component == ".." {
-                // The body never lets a virtual path climb out of a source.
-                return Err(Error::NotFound(format!(
-                    "path traversal rejected: '{path}'"
-                )));
+    /// The tree, as virtual path → real file.
+    fn index(&self) -> &HashMap<VirtualPath, PathBuf> {
+        self.index.get_or_init(|| {
+            let mut files = Vec::new();
+            Self::walk(&self.root, &self.root, &mut files);
+            // Sorted first, so that when two names differ only by case — which
+            // no virtual path can tell apart — the same one wins every run
+            // instead of whichever the filesystem happened to list first.
+            files.sort();
+            let mut index = HashMap::with_capacity(files.len());
+            for (path, real) in files {
+                index.entry(path).or_insert(real);
             }
-        }
-        let mut real = self.root.clone();
-        for component in path.components() {
-            real.push(component);
-        }
-        Ok(real)
+            index
+        })
     }
 
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<(VirtualPath, u64)>) {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(VirtualPath, PathBuf)>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -261,23 +274,29 @@ impl DirectorySource {
             if file_type.is_dir() {
                 Self::walk(&entry.path(), root, out);
             } else if file_type.is_file() {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 let relative = match entry.path().strip_prefix(root) {
                     Ok(relative) => relative.to_string_lossy().into_owned(),
                     Err(_) => continue,
                 };
-                out.push((VirtualPath::new(&relative), size));
+                out.push((VirtualPath::new(&relative), entry.path()));
             }
         }
     }
 
     /// The real file a virtual path names.
     fn locate(&self, path: &VirtualPath) -> Result<PathBuf> {
-        let real = self.resolve(path)?;
-        match real.is_file() {
-            true => Ok(real),
-            false => Err(Error::NotFound(format!(
-                "'{path}' (in {}) ",
+        for component in path.components() {
+            if component == ".." {
+                // The body never lets a virtual path climb out of a source.
+                return Err(Error::NotFound(format!(
+                    "path traversal rejected: '{path}'"
+                )));
+            }
+        }
+        match self.index().get(path) {
+            Some(real) => Ok(real.clone()),
+            None => Err(Error::NotFound(format!(
+                "'{path}' is not in {}",
                 self.root.display()
             ))),
         }
@@ -300,8 +319,14 @@ impl FileSource for DirectorySource {
     }
 
     fn list(&self) -> Vec<(VirtualPath, u64)> {
-        let mut out = Vec::new();
-        Self::walk(&self.root, &self.root, &mut out);
+        let mut out: Vec<(VirtualPath, u64)> = self
+            .index()
+            .iter()
+            .map(|(path, real)| {
+                let size = fs::metadata(real).map(|m| m.len()).unwrap_or(0);
+                (path.clone(), size)
+            })
+            .collect();
         out.sort();
         out
     }
@@ -503,6 +528,38 @@ mod tests {
             source.read_range(&VirtualPath::new("missing.dat"), 0, 1),
             Err(Error::NotFound(_))
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_capitalised_file_is_found_through_its_lower_cased_name() {
+        // A virtual path is lower-cased; a directory is not. Joining the two
+        // together happens to work on macOS, where the filesystem folds case,
+        // and fails on Linux, where it does not — so the same release was
+        // detected on one machine and invisible on the other. This test is the
+        // regression: it only *fails* on a case-sensitive filesystem, which is
+        // why Linux CI is the job that enforces it.
+        let dir = std::env::temp_dir().join(format!("kintsugi-vfs-case-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("exe")).unwrap();
+        std::fs::write(dir.join("exe").join("Graphics.BSA"), b"BSArc\0\0\0\0").unwrap();
+        let vfs = Vfs::from_directory(&dir).unwrap();
+
+        let listed: Vec<String> = vfs
+            .list()
+            .into_iter()
+            .map(|(path, size)| format!("{path} ({size})"))
+            .collect();
+        assert_eq!(listed, vec!["exe/graphics.bsa (9)".to_string()]);
+        assert_eq!(
+            vfs.read_range(&VirtualPath::new("exe/graphics.bsa"), 0, 5)
+                .unwrap(),
+            b"BSArc"
+        );
+        // And the same file, asked for in the case it was written in.
+        assert_eq!(
+            vfs.read(&VirtualPath::new("EXE/Graphics.BSA")).unwrap(),
+            b"BSArc\0\0\0\0"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
