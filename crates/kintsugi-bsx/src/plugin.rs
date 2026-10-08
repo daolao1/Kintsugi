@@ -543,11 +543,11 @@ impl BsxMount {
              {shown} line(s) shown in place, {choices} choice(s) that branch and rejoin, and the \
              scenery the code sets — {backgrounds} background(s), {music} music cue(s), {sounds} \
              sound(s) and voice(s) — resolved by resource name. The channel byte still says \
-             which box the game draws, not who is speaking, so no line is given a speaker. The \
-             instruction that calls one program from another is not yet decoded, so this is \
-             every program walked once — the endings and replays the release only reaches on \
-             its own terms play straight through here — not one playthrough. Choice labels are \
-             shown but not yet offered to the translator.{}",
+             which box the game draws, not who is speaking, so no line is given a speaker. \
+             Programs that close with a forward call are followed where they point; the rest \
+             play in file order — the endings and replays the release only reaches on its own \
+             terms play straight through here — so this is every program walked once, not one \
+             playthrough. Choice labels are shown but not yet offered to the translator.{}",
             programs.len(),
             if notes.is_empty() {
                 String::new()

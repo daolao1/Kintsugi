@@ -72,6 +72,13 @@ enum Anchor {
     },
     /// `2d ff ff ff ff` — the option list is complete.
     OfferListEnd { at: usize },
+    /// `03 <program>` as a program's final instruction: where the story goes
+    /// when this program ends. Measured on the release: ten sites, each the
+    /// last five bytes of its program — the opening spine, the endings
+    /// returning to the main menu, and six branches naming their own merge
+    /// point. The same byte pair mid-program is the housekeeping shape of
+    /// the music macros, so position, not pattern, is what proves it.
+    Call { at: usize, target: usize },
 }
 
 /// The channel bytes the voice instruction has been measured to use.
@@ -312,6 +319,15 @@ fn anchors(story: &Story, program: &Program, resources: usize, programs: usize) 
             at += 5;
             continue;
         }
+        if byte == 0x03 && at + 5 == program.end {
+            if let Some(target) = u32_at(bytes, at + 1) {
+                if target < programs && target != program.index {
+                    anchors.push(Anchor::Call { at, target });
+                    at += 5;
+                    continue;
+                }
+            }
+        }
         if VOICE_CHANNELS.contains(&byte)
             && at + 8 <= program.end
             && bytes.get(at + 1..at + 4) == Some(&[0, 0, 0][..])
@@ -441,6 +457,26 @@ pub fn emit(
                 .or_insert((programs[index].index, targets.clone()));
         }
     }
+    // A link that points backward — an ending returning to the main menu —
+    // is true of the game but fatal to a walk with no menu state: followed,
+    // it would loop forever. Backward links are counted, not followed.
+    let start_of: BTreeMap<usize, usize> = programs
+        .iter()
+        .map(|program| (program.index, program.start))
+        .collect();
+    let mut backward_links = 0usize;
+    let mut forward_link_of: BTreeMap<usize, usize> = BTreeMap::new();
+    for (position, anchors) in all_anchors.iter().enumerate() {
+        if let Some(Anchor::Call { target, .. }) =
+            anchors.iter().find(|anchor| matches!(anchor, Anchor::Call { .. }))
+        {
+            if start_of[target] > programs[position].start {
+                forward_link_of.insert(programs[position].index, *target);
+            } else {
+                backward_links += 1;
+            }
+        }
+    }
     let mut merge_of: BTreeMap<usize, usize> = BTreeMap::new();
     for (owner, targets) in branch_targets.values() {
         let Some(merge_line) = targets
@@ -540,11 +576,23 @@ pub fn emit(
                         commands.push(Command::Choice(std::mem::take(&mut offers)));
                     }
                 }
+                // A tail call acts when the program ends, which is after the
+                // anchors — handled below.
+                Anchor::Call { .. } => {}
             }
         }
-        // A branch the reader did not pick must not play: each branch ends by
-        // jumping to the program that continues the story.
-        if let Some(&merge) = merge_of.get(&program.index) {
+        // Where this program goes when it ends: the call it names itself,
+        // when it names one...
+        if let Some(&target) = forward_link_of.get(&program.index) {
+            let name = programs
+                .iter()
+                .find(|p| p.index == target)
+                .and_then(|p| p.name.as_deref());
+            commands.push(Command::Jump(program_label(target, name)));
+        // ...and for a branch that names none, the program that continues
+        // the story after both branches, so the route the reader did not
+        // pick does not play.
+        } else if let Some(&merge) = merge_of.get(&program.index) {
             let name = programs
                 .iter()
                 .find(|p| p.index == merge)
@@ -558,6 +606,19 @@ pub fn emit(
         }
     }
 
+    let links = forward_link_of.len();
+    if links > 0 {
+        notes.push(format!(
+            "{links} program-to-program link(s) are read from tail calls; the conditional and \
+             mid-program calls (the guard instruction is not decoded) are noted but not followed."
+        ));
+    }
+    if backward_links > 0 {
+        notes.push(format!(
+            "{backward_links} backward link(s) — endings returning to the main menu — are not \
+             followed: a walk with no menu state would loop forever."
+        ));
+    }
     // The lines no instruction shows are still the story's words: kept, at
     // the end, as raw lines, exactly as the text-only walk kept them. Choice
     // labels are shown — as the choice — so they are not "unshown".
@@ -726,7 +787,14 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // branch_a by its own closing call, branch_b by the merge rule.
         assert_eq!(jumps, vec!["bsx:3:merge", "bsx:3:merge"]);
+        // The mid-program 03 pair of the music-macro shape is never followed:
+        // no jump names macEjaculate1's fixture analogue, program 1's sibling.
+        assert!(
+            !jumps.contains(&"bsx:1:branch_a"),
+            "a mid-program 03 is not a link: {jumps:?}"
+        );
     }
 
     #[test]

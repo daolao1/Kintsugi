@@ -316,12 +316,16 @@ pub fn make_staged_story() -> Vec<u8> {
     code.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]); // id 0 -> program 1, label line 1
     code.extend_from_slice(&[0x2C, 1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0]); // id 1 -> program 2, label line 2
     code.extend_from_slice(&[0x2D, 0xFF, 0xFF, 0xFF, 0xFF]);
+    // The housekeeping shape the music macros are full of: an 03 pair that
+    // is not a call, mid-program, and never to be followed.
+    code.extend_from_slice(&[0x03, 1, 0, 0, 0]);
     code.push(0x09);
     // branch_a
     program_starts.push(code.len());
     code.extend_from_slice(&[0x31, 1, 0, 0, 0]);
     code.extend_from_slice(&[0x1A, 2, 4, 0, 0, 0]); // show line 4
-    code.push(0x09);
+    code.extend_from_slice(&[0x03, 3, 0, 0, 0]); // ends by entering the merge
+
     // branch_b
     program_starts.push(code.len());
     code.extend_from_slice(&[0x31, 2, 0, 0, 0]);
@@ -352,7 +356,7 @@ pub fn make_staged_story() -> Vec<u8> {
     // The program table: (code offset, name offset) pairs. The names follow
     // after an eight-byte gap so no directory window reads the pair as a
     // string table.
-    let names_block_at = out.len() + 8 + (program_starts.len() * 8).div_ceil(8) * 8;
+    let names_block_at = (out.len() + program_starts.len() * 8).next_multiple_of(8) + 8;
     let mut name_offsets = Vec::new();
     let mut names_block = Vec::new();
     for name in program_names {
