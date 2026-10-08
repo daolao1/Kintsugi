@@ -247,21 +247,31 @@ pub fn upscale_asset(
 // string the caller owns, or NULL when even the error could not be built.
 // ---------------------------------------------------------------------------
 
-/// Run `body` with unwinding turned into an error string.
+/// Turn a panic into the error text both boundaries show.
 ///
-/// Returns an owned pointer, or NULL if the error message itself could not be
-/// allocated. A panic that escapes into a JVM is undefined behaviour, so it
-/// stops here.
-fn guard(body: impl FnOnce() -> Result<String>) -> *mut c_char {
+/// This is the *single* implementation of the no-unwinding rule: the C ABI's
+/// `guard` and the JNI bridge's `answer` both call it, so the two surfaces
+/// cannot drift apart in what they do with a panic. Unwinding into a C caller
+/// or into a JVM is undefined behaviour, and a panic is information the UI can
+/// show, not a reason to take the app down.
+pub(crate) fn caught(body: impl FnOnce() -> Result<String>) -> String {
     let outcome = catch_unwind(AssertUnwindSafe(body));
-    let message = match outcome {
+    match outcome {
         Ok(Ok(text)) => text,
         Ok(Err(e)) => format!("error: {e}"),
         Err(_) => "error: the engine panicked; this is a bug, and the seam \
                    that caused it should be reported"
             .to_string(),
-    };
-    match CString::new(message) {
+    }
+}
+
+/// Run `body` with unwinding turned into an error string.
+///
+/// Returns an owned pointer, or NULL if the error message itself could not be
+/// allocated. A panic that escapes into a C caller is undefined behaviour, so
+/// it stops here.
+fn guard(body: impl FnOnce() -> Result<String>) -> *mut c_char {
+    match CString::new(caught(body)) {
         Ok(text) => text.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
@@ -392,6 +402,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_panic_becomes_an_error_string_instead_of_unwinding() {
+        // The one place the no-unwinding rule *can* be tested without a C
+        // caller or a JVM: the helper both surfaces call. A panic prints its
+        // usual message to stderr — the point is that `caught` returns the
+        // text instead of letting the unwind escape.
+        let text = caught(|| -> Result<String> { panic!("probe: the seam exploded") });
+        assert!(text.starts_with("error:"), "{text}");
+        assert!(text.contains("panicked"), "{text}");
+        assert!(text.contains("should be reported"), "{text}");
+    }
+
+    #[test]
+    fn caught_passes_success_and_refusal_through() {
+        assert_eq!(caught(|| Ok("repaired".to_string())), "repaired");
+        let refusal = caught(|| Err(Error::unsupported("bluegale", "no images yet")));
+        assert!(refusal.starts_with("error: "), "{refusal}");
+        assert!(refusal.contains("bluegale"), "{refusal}");
     }
 
     #[test]

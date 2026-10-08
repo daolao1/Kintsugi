@@ -103,36 +103,55 @@ pub fn parse_bdt(path: impl Into<VirtualPath>, data: &[u8]) -> Result<Script> {
 /// The walk below is deliberately the *same* walk [`parse_bdt`] does, so a
 /// command index means the same thing to the reader and the writer.
 ///
-/// Everything that is not a replaced line survives byte for byte: line
-/// endings, blank lines, `\t` indentation, the `$`/`%` sigil on labels (we
-/// have not verified that the engine's interpreter treats the two alike, so
-/// the only honest thing is to never rewrite one), any trailing bytes, and
-/// whether the file ended with a newline at all. A patch that silently
-/// reformats a script would be a repair that hides itself.
+/// Only replaced lines are re-encoded. Every other byte is copied straight
+/// from the de-XORed original into the patch, which is what makes the promise
+/// below literal rather than aspirational: line endings, blank lines, `\t`
+/// indentation, the `$`/`%` sigil on labels (we have not verified that the
+/// engine's interpreter treats the two alike, so the only honest thing is to
+/// never rewrite one), any trailing bytes, and whether the file ended with a
+/// newline at all.
+///
+/// Copying rather than re-encoding matters more than it looks. CP932 has
+/// hundreds of characters with more than one valid byte sequence — the NEC and
+/// IBM duplicate rows, for instance `0x87 0x90` and `0x81 0xE0` are both `≒` —
+/// so decoding the whole file and encoding it again would silently re-spell
+/// lines nobody asked to touch, in a patch that reports `replaced` as it was.
+/// A repair that edits bytes it did not understand is not a repair.
 pub fn rewrite_bdt(
     original: &[u8],
     replacements: &BTreeMap<usize, String>,
 ) -> Result<WrittenScript> {
-    let text = decode_bdt_text(original);
-    let mut out = String::with_capacity(text.len());
+    let plain: Vec<u8> = original.iter().map(|b| b ^ 0xFF).collect();
+    let mut out: Vec<u8> = Vec::with_capacity(plain.len());
     let mut replaced = 0usize;
     let mut matched: BTreeSet<usize> = BTreeSet::new();
     let mut command = 0usize;
+    let mut cursor = 0usize;
 
-    // `split_inclusive` keeps each line's terminator, so the file's own
-    // endings are reproduced without deciding anything about them.
-    for line in text.split_inclusive('\n') {
-        let (content, terminator) = match line.strip_suffix('\n') {
-            Some(rest) => match rest.strip_suffix('\r') {
-                Some(rest) => (rest, "\r\n"),
-                None => (rest, "\n"),
-            },
-            None => (line, ""),
+    while cursor < plain.len() {
+        // The line's bytes, terminator included, and where its content stops.
+        let (content_end, next) = match plain[cursor..].iter().position(|&b| b == b'\n') {
+            Some(offset) => {
+                let newline = cursor + offset;
+                let content_end = if newline > cursor && plain[newline - 1] == b'\r' {
+                    newline - 1
+                } else {
+                    newline
+                };
+                (content_end, newline + 1)
+            }
+            None => (plain.len(), plain.len()),
         };
+        let content = &plain[cursor..content_end];
 
-        let after_tabs = content.trim_start_matches('\t');
+        // Structure is decided on the decoded text because that is exactly
+        // what `parse_bdt` decides on; only the *output* is byte-level. The
+        // two must agree command for command, or a translation would land on
+        // the wrong line.
+        let decoded = crate::decode_cp932(content);
+        let after_tabs = decoded.trim_start_matches('\t');
         let is_label = after_tabs.starts_with('$') || after_tabs.starts_with('%');
-        let is_blank = content.trim_end().is_empty();
+        let is_blank = decoded.trim_end().is_empty();
 
         // Blank lines and empty labels produce no command (see `parse_bdt`),
         // so they must not consume an index here either.
@@ -141,19 +160,22 @@ pub fn rewrite_bdt(
 
         match replacements.get(&command).filter(|_| is_command) {
             Some(new_text) if !is_label => {
-                check_replaceable(new_text, content)?;
-                let indent = &content[..content.len() - after_tabs.len()];
-                out.push_str(indent);
-                out.push_str(new_text.trim_end());
-                out.push_str(terminator);
+                check_replaceable(new_text, &decoded)?;
+                // Indentation is copied, the words are encoded, the ending is
+                // copied: the three parts of a line, each handled once.
+                let indent = content.iter().take_while(|&&b| b == b'\t').count();
+                out.extend_from_slice(&plain[cursor..cursor + indent]);
+                out.extend_from_slice(&crate::encode_cp932(new_text.trim_end())?);
+                out.extend_from_slice(&plain[content_end..next]);
                 replaced += 1;
                 matched.insert(command);
             }
-            _ => out.push_str(line),
+            _ => out.extend_from_slice(&plain[cursor..next]),
         }
         if is_command {
             command += 1;
         }
+        cursor = next;
     }
 
     let unmatched: Vec<usize> = replacements
@@ -161,9 +183,8 @@ pub fn rewrite_bdt(
         .copied()
         .filter(|id| !matched.contains(id))
         .collect();
-    let plain = crate::encode_cp932(&out)?;
     Ok(WrittenScript {
-        data: plain.into_iter().map(|b| b ^ 0xFF).collect(),
+        data: out.into_iter().map(|b| b ^ 0xFF).collect(),
         replaced,
         unmatched,
     })
@@ -196,7 +217,7 @@ fn check_replaceable(new_text: &str, original_line: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode_cp932;
+    use crate::{decode_cp932, encode_cp932};
     use kintsugi_core::script::Command;
 
     fn make_bdt(text: &str) -> Vec<u8> {
@@ -377,5 +398,84 @@ mod tests {
         .unwrap();
         assert_eq!(written.replaced, 1);
         assert_eq!(decode_bdt_text(&written.data), "$a\r\n金繕いの夜。\r\n");
+    }
+
+    /// A BDT whose text uses a CP932 spelling that does not survive a
+    /// decode/encode round trip: `87 90` is the NEC row-13 `≒`, whose canonical
+    /// spelling is `81 E0`. Nothing else in these tests can hold such a byte
+    /// sequence, because the fixtures are built from Rust strings.
+    fn bdt_with_a_duplicate_spelling() -> (Vec<u8>, Vec<u8>) {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(b"$start\r\n");
+        plain.extend_from_slice(b"\x87\x90\x82\xcc\x93\xfa\r\n"); // ≒の日, NEC spelling
+        plain.extend_from_slice(b"\x8b\xe2\x82\xc5\x82\xb7\r\n"); // 金継ぎです
+        (plain.iter().map(|b| b ^ 0xFF).collect(), plain)
+    }
+
+    #[test]
+    fn an_untouched_file_comes_back_byte_for_byte() {
+        let (original, plain) = bdt_with_a_duplicate_spelling();
+
+        // The premise, checked rather than assumed: if CP932 round-tripped,
+        // this test would pass even with a re-encoding writer.
+        let respelled = encode_cp932(&decode_cp932(&plain)).unwrap();
+        assert_ne!(
+            respelled, plain,
+            "this test is vacuous unless decode/encode really is lossy here"
+        );
+
+        let written = rewrite_bdt(&original, &BTreeMap::new()).unwrap();
+        assert_eq!(written.replaced, 0);
+        assert!(
+            written.unmatched.is_empty(),
+            "an empty request cannot leave anything unmatched"
+        );
+        assert_eq!(
+            written.data, original,
+            "an empty replacement map must not change one byte of the file"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_spelling_survives_a_translation_elsewhere() {
+        let (original, _) = bdt_with_a_duplicate_spelling();
+        // Command 1 is the NEC-spelled line; command 2 is the one below it.
+        let written = rewrite_bdt(
+            &original,
+            &BTreeMap::from([(2, "gold runs through the crack".to_string())]),
+        )
+        .unwrap();
+
+        assert_eq!(written.replaced, 1);
+        let plain_out: Vec<u8> = written.data.iter().map(|b| b ^ 0xFF).collect();
+        assert!(
+            plain_out.windows(2).any(|pair| pair == [0x87, 0x90]),
+            "the NEC-spelled line was re-encoded while translating another line"
+        );
+        assert!(
+            !plain_out.windows(2).any(|pair| pair == [0x81, 0xE0]),
+            "the line was rewritten to its canonical spelling"
+        );
+        assert_eq!(
+            decode_bdt_text(&written.data),
+            "$start\r\n≒の日\r\ngold runs through the crack\r\n"
+        );
+    }
+
+    #[test]
+    fn an_untouched_line_keeps_its_own_line_ending() {
+        // One LF line between CRLF lines, indentation, and no final newline:
+        // all of it is copied, none of it is normalized.
+        let mut plain = Vec::new();
+        plain.extend_from_slice(b"$start\r\n");
+        plain.extend_from_slice(b"\tone\n");
+        plain.extend_from_slice(b"two");
+        let original: Vec<u8> = plain.iter().map(|b| b ^ 0xFF).collect();
+
+        let written = rewrite_bdt(&original, &BTreeMap::from([(3, "two!".to_string())])).unwrap();
+        assert_eq!(
+            written.data, original,
+            "replacing the last line must leave the rest, endings included, alone"
+        );
     }
 }

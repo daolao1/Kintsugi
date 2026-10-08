@@ -564,6 +564,7 @@ fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
 
     let image = mount.read_image(&VirtualPath::new(&asset))?;
     let output = PathBuf::from(args.flag_or("output", "kintsugi-upscaled.png"));
+    ensure_outside_game(Path::new(dir), &output, "the glazed image")?;
     let upscaled = upscale(&image, factor, method)?;
     let png = encode_png(&upscaled)?;
     std::fs::write(&output, &png)
@@ -660,6 +661,7 @@ fn cmd_interpolate(args: &[String]) -> std::result::Result<(), Failure> {
     let interpolator = BlendInterpolator;
     let out_frames = interpolate_sequence(&group, factor, &interpolator)?;
     let output_dir = PathBuf::from(args.flag_or("output", "kintsugi-frames"));
+    ensure_outside_game(Path::new(dir), &output_dir, "the interpolated frames")?;
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| Error::Io(format!("creating {}: {e}", output_dir.display())))?;
     for (index, frame) in out_frames.iter().enumerate() {
@@ -838,20 +840,7 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
             .collect();
         let written = mount.write_script(&script_path, &replacements)?;
         let path = PathBuf::from(out_path);
-        // The original is not a target. A loose script inside the game folder
-        // is the one file this tool must never write, so the promise is
-        // structural rather than documentary: refuse and say what to do.
-        let original_on_disk = Path::new(dir).join(script_path.as_str());
-        if same_file(&original_on_disk, &path) {
-            return Err(Failure::Usage(format!(
-                "refusing to write the patch over the original: {} is the file \
-                 being read.\n         Write the repair somewhere else (for example \
-                 {}) and keep the original as it is;\n         installing a patch is \
-                 your decision, not this tool's.",
-                path.display(),
-                suggested_patch_path(&original_on_disk).display()
-            )));
-        }
+        ensure_outside_game(Path::new(dir), &path, "the repaired script")?;
         std::fs::write(&path, &written.data)
             .map_err(|e| Error::Io(format!("writing {}: {e}", path.display())))?;
         println!(
@@ -887,35 +876,70 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
     Ok(())
 }
 
-/// Where a repair should go instead: `story.bdt` suggests `story.repaired.bdt`,
-/// so the patch sits beside the original with the seam visible in the name.
-fn suggested_patch_path(original: &Path) -> PathBuf {
-    let stem = original
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("script");
-    let name = match original.extension().and_then(|e| e.to_str()) {
-        Some(extension) => format!("{stem}.repaired.{extension}"),
-        None => format!("{stem}.repaired"),
+/// Refuse to write anywhere inside the game directory.
+///
+/// README.md says "nothing in the original game folder is ever modified —
+/// repairs are written beside it". This is the check that makes that sentence
+/// true rather than a promise about the user's care. It stops the obvious
+/// mistake (`--write-script game/story.bdt`, the very file being read) and the
+/// quieter one (`--write-script game/game.snn` — not the script, but still an
+/// original), and it keeps every artifact this tool produces — patch, PNG,
+/// frame directory — outside the folder the game is installed in.
+///
+/// What it does not see: a hard link to an original, made outside the folder
+/// (`ln game/story.bdt /tmp/copy.bdt` is a second name for the same bytes).
+/// Catching that needs file identity — device + inode, or volume + file index
+/// — and portable std has no call for it, so a fix would be `#[cfg]` platform
+/// code in the shell. Rather than a check that half-works, the hole is written
+/// down here and in `docs/PLATFORMS.md`.
+fn ensure_outside_game(
+    game_dir: &Path,
+    out: &Path,
+    what: &str,
+) -> std::result::Result<(), Failure> {
+    let Some(root) = resolve(game_dir) else {
+        return Ok(()); // A game directory that cannot be resolved already failed to open.
     };
-    original.with_file_name(name)
+    let Some(target) = resolve(out) else {
+        return Ok(()); // An unusable path will be reported by the write itself.
+    };
+    if target.starts_with(&root) {
+        let suggestion = match root.parent() {
+            Some(parent) => format!(
+                " Write it outside the folder instead, for example {}.",
+                parent
+                    .join(out.file_name().unwrap_or(root.as_os_str()))
+                    .display()
+            ),
+            None => String::new(),
+        };
+        return Err(Failure::Usage(format!(
+            "refusing to write {what} inside the game folder: {}\n         \
+             The game folder is read-only to this tool, because a repair that \
+             edits the game it was hired to save is not a repair.{suggestion}",
+            target.display()
+        )));
+    }
+    Ok(())
 }
 
-/// True when two paths name the same file, tolerating a destination that does
-/// not exist yet (in which case its parent directory is resolved instead).
-fn same_file(a: &Path, b: &Path) -> bool {
-    fn resolve(path: &Path) -> Option<PathBuf> {
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            return Some(canonical);
+/// The absolute, symlink-free form of a path, whether or not it exists yet.
+///
+/// `canonicalize` alone is not enough: the patch, the PNG, and the frame folder
+/// usually do not exist when they are checked. So the deepest existing ancestor
+/// is canonicalized and the rest is appended, which also collapses `a/./b` and
+/// resolves a symlinked game folder.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(path).ok()?;
+    let mut suffix = PathBuf::new();
+    let mut probe = absolute.as_path();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(probe) {
+            return Some(canonical.join(suffix));
         }
-        // Not created yet: compare the directory it would land in plus the
-        // name, which is how `a/./b.bdt` and `a/b.bdt` become equal.
-        let parent = std::fs::canonicalize(path.parent()?).ok()?;
-        Some(parent.join(path.file_name()?))
-    }
-    match (resolve(a), resolve(b)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
+        let name = probe.file_name()?;
+        suffix = Path::new(name).join(&suffix);
+        probe = probe.parent()?;
     }
 }
 
@@ -984,7 +1008,7 @@ fn print_usage() {
     println!("          --model M            default gpt-4o-mini");
     println!("          --glossary FILE      'source = target' lines, # comments");
     println!("          --jsonl-dir DIR      also write source/translated JSONL");
-    println!("          --write-script PATH  write the repaired script (never the original)");
+    println!("          --write-script PATH  write the repaired script outside <DIR>");
     println!("          --only-typed         skip unclassified raw lines");
     println!("          --mock               offline dry run, no network");
     println!("                               (KINTSUGI_MOCK_MARKER sets its prefix)");
@@ -995,7 +1019,10 @@ fn print_usage() {
     println!(
         "{}",
         dim(
-            "The originals are never modified. All repairs stay visible. 以金缮之艺，续老游戏之命。"
+            "<DIR> is read-only: the game folder is never written to — not by
+--write-script, not by upscale -o, not by interpolate -o. Every
+artifact lands outside it, and installing a patch is your decision.
+The originals are never modified. All repairs stay visible. 以金缮之艺，续老游戏之命。"
         )
     );
 }

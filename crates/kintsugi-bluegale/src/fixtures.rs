@@ -174,7 +174,49 @@ pub fn make_snn(blobs: &[&[u8]]) -> (Vec<u8>, Vec<(u32, u32)>) {
 /// * `story.bdt` — the kintsugi story itself, in Japanese, labels and all.
 ///
 /// Returns the list of created file paths.
+/// The note a demo folder carries, so a second run may overwrite it while a
+/// real game folder is never touched by accident.
+const DEMO_MARKER: &str = ".kintsugi-demo";
+
+/// Write a tiny, complete, BlueGale-shaped game into `dir`.
+///
+/// Every byte is synthesized here: the archive, the index, the images, and the
+/// script. Nothing is copied from a real game, so the whole pipeline can be
+/// exercised without owning one — and nothing copyrighted is in this
+/// repository. Returns the files written.
 pub fn write_demo_game(dir: &Path) -> Result<Vec<PathBuf>> {
+    // This is the one command that writes *into* a folder, which makes it the
+    // one that could land on a real game: `demo --dir <game folder>` must not
+    // overwrite originals. A folder this command made carries the marker below
+    // and may be rewritten; any other folder with files in it is refused, so
+    // the demo can be re-run without becoming a way to clobber someone's game.
+    let marker = dir.join(DEMO_MARKER);
+    if dir.exists() && !marker.exists() {
+        let mut occupied: Vec<String> = fs::read_dir(dir)
+            .map_err(|e| Error::Io(format!("reading {}: {e}", dir.display())))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        occupied.sort();
+        if !occupied.is_empty() {
+            let shown: Vec<&str> = occupied.iter().take(3).map(String::as_str).collect();
+            return Err(Error::unsupported(
+                "demo game",
+                format!(
+                    "'{}' already holds {} file(s) ({}{}) and was not written by this \
+                     command; refusing to write a demo game over them",
+                    dir.display(),
+                    occupied.len(),
+                    shown.join(", "),
+                    if occupied.len() > shown.len() {
+                        ", …"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+    }
     fs::create_dir_all(dir).map_err(|e| Error::Io(format!("creating {}: {e}", dir.display())))?;
 
     // 4x3 title logo, 24bpp: a gold seam across a dark field.
@@ -294,6 +336,16 @@ pub fn write_demo_game(dir: &Path) -> Result<Vec<PathBuf>> {
         .map_err(|e| Error::Io(format!("writing {}: {e}", snn_path.display())))?;
     fs::write(&bdt_path, &story_bdt)
         .map_err(|e| Error::Io(format!("writing {}: {e}", bdt_path.display())))?;
+
+    // Bookkeeping, not part of the game, so it is written but not listed: the
+    // marker is what lets the next run know this folder is a demo folder.
+    let marker_path = dir.join(DEMO_MARKER);
+    fs::write(
+        &marker_path,
+        "This folder holds a synthetic demo game written by `kintsugi demo`,\n\
+         not a real one. It carries no copyrighted bytes and is safe to delete.\n",
+    )
+    .map_err(|e| Error::Io(format!("writing {}: {e}", marker_path.display())))?;
 
     Ok(vec![inx_path, snn_path, bdt_path])
 }

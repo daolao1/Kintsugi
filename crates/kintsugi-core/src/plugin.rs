@@ -99,12 +99,12 @@ pub trait EngineMount: Send {
         ))
     }
 
-    /// Translate a script into the body's IR.
+    /// Read a script into the body's IR.
     fn read_script(&self, path: &VirtualPath) -> Result<Script> {
         let _ = path;
         Err(Error::unsupported(
             self.info().engine.clone(),
-            "this seam does not translate scripts yet",
+            "this seam does not read scripts yet",
         ))
     }
 

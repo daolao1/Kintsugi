@@ -151,11 +151,24 @@ The philosophy is not a slogan; it is enforced in four places.
 
 ### 1. Originals are never written
 
-Seams take `&Vfs`, which is read-only by construction; the only `write` in the
-whole workspace is the host writing the file *you* named (`-o out.png`,
-`--write-script out.bdt`, `--jsonl-dir out/`). `EngineMount::write_script`
-returns `WrittenScript` bytes and never touches a disk. A seam that could write
-would be a seam that could destroy the thing it was hired to save.
+Seams take `&Vfs`, which is read-only by construction. No seam contains a write
+at all: `EngineMount::write_script` returns `WrittenScript` bytes and never
+touches a disk. Every write in the workspace is (a) a host writing a path the
+user named — `crates/kintsugi/src/main.rs` for `-o out.png`, `--write-script`,
+`--jsonl-dir`, and `crates/kintsugi-android/src/lib.rs` for the PNG the Android
+shell asks for — or (b) the glaze helper `kintsugi-translate::write_jsonl`,
+which the host calls with a path the user named. Nothing else in the tree opens
+a file for writing outside tests and the fixture generator.
+
+Naming a path is not enough, though, so the host enforces the shape of it:
+**the game folder is read-only.** `ensure_outside_game` refuses `--write-script`,
+`upscale -o`, and `interpolate -o` that resolve inside the directory being read,
+which covers the file being read, any other original in there, and the glaze's
+own artifacts. `demo` is the one writer inside a folder it created, guarded by a
+`.kintsugi-demo` marker so it cannot plant fixtures over a real installation.
+The residual hole — a hard link to an original made outside the folder — needs
+file identity that portable std does not expose, and is documented rather than
+half-checked.
 
 ### 2. A patch changes only what it translates
 
@@ -164,7 +177,14 @@ would be a seam that could destroy the thing it was hired to save.
 appears in `replacements`. Line endings, blank lines, `\t` indentation, the
 `$`/`%` sigil on labels (we have not verified the engine treats them alike, so
 they are never rewritten), a missing trailing newline, and any bytes we did not
-understand all survive byte for byte.
+understand all survive byte for byte — because the writer *copies* them from the
+de-XORed original instead of decoding and re-encoding the file. That detail is
+load-bearing: CP932 contains hundreds of characters with more than one valid
+spelling (the NEC and IBM duplicate rows, e.g. `87 90` and `81 E0` are both
+`≒`), so a re-encoding writer would silently re-spell lines nobody asked to
+change while reporting `replaced == 0`. Three tests hold this down, including an
+untouched file that must come back byte-identical, with an assertion that the
+round trip really is lossy for that input so the test cannot pass vacuously.
 
 It also refuses replacements that would change the file's *structure* rather
 than its words: a line break inside a translation, or a translation that starts
@@ -296,9 +316,11 @@ it blends, it does not invent motion, and it does not claim to.
 * **The JNI names are checked against `nm`.** A mismatch there is the classic
   Android `UnsatisfiedLinkError` at first launch, so CI greps the exported
   symbols for all five `Java_com_kintsugi_engine_EngineBridge_*` names.
-* **Every release artifact is smoke-tested by running it.** macOS, Windows,
-  Linux, and the APK are built from the same commit, and each job plays the
-  demo game and fails if the output is wrong.
+* **Every runnable artifact is smoke-tested by running it.** The macOS, Windows,
+  and Linux jobs are built from the same commit and each plays the demo game and
+  fails if the output is wrong. The APK is not run — CI unpacks it and proves the
+  four `libkintsugi_android.so` slices are inside; an on-device run is still a
+  manual step (see [PLATFORMS](PLATFORMS.md)).
 
 ---
 

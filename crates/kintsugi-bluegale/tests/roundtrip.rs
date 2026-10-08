@@ -189,3 +189,42 @@ fn loose_bdt_alone_mounts_without_archives() {
     let script = mount.read_script(&"scene.bdt".into()).unwrap();
     assert_eq!(script.commands.len(), 2);
 }
+
+#[test]
+fn writing_the_demo_twice_is_allowed_because_it_made_the_folder() {
+    let temp = TempDir::new("demo-twice");
+    let first = fixtures::write_demo_game(&temp.0).unwrap();
+    assert_eq!(first.len(), 3);
+    // Re-running is a normal thing to do with a playground.
+    let second = fixtures::write_demo_game(&temp.0).unwrap();
+    assert_eq!(first, second, "the same three files, the same place");
+}
+
+#[test]
+fn the_demo_refuses_a_folder_it_did_not_write() {
+    let temp = TempDir::new("demo-guard");
+    // A folder that already holds game files: `demo --dir <here>` in a real
+    // installation must not overwrite originals, and `story.bdt` is a name a
+    // real game could plausibly use.
+    let original = b"\x00not a demo\xff";
+    fs::write(temp.0.join("story.bdt"), original).unwrap();
+
+    let err = fixtures::write_demo_game(&temp.0).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("refusing to write a demo game"),
+        "{message}"
+    );
+    assert!(message.contains("story.bdt"), "{message}");
+    assert_eq!(
+        fs::read(temp.0.join("story.bdt")).unwrap(),
+        original,
+        "the refusal must leave the file that was already there alone"
+    );
+    // Nothing else was planted beside it either.
+    let names: Vec<String> = fs::read_dir(&temp.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["story.bdt".to_string()]);
+}

@@ -83,6 +83,15 @@ pub type NotAFrame = (String, String);
 pub fn group_by_size(frames: &[NamedFrame]) -> (Vec<NamedFrame>, Vec<NotAFrame>) {
     use std::collections::BTreeMap;
 
+    // An empty input has no sequence to choose and nothing to leave out. This
+    // is also what stops the `expect` below from being a panic: `max_by_key`
+    // has nothing to return, so the empty case is decided here, by contract
+    // ("an empty input stays empty", the same rule `interpolate_sequence`
+    // follows) rather than by an unwrap.
+    if frames.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
     let mut sizes: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     let mut first_seen: Vec<(u32, u32)> = Vec::new();
     for (_, image) in frames {
@@ -281,6 +290,16 @@ mod tests {
         ];
         let (sequence, skipped) = group_by_size(&frames);
         assert_eq!(sequence.len(), 2);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn grouping_an_empty_directory_is_empty_rather_than_a_panic() {
+        // `interpolate_sequence` documents "an empty input stays empty"; the
+        // grouping step has to agree, or a host that groups before it checks
+        // for frames gets a panic instead of an empty answer.
+        let (sequence, skipped) = group_by_size(&[]);
+        assert!(sequence.is_empty());
         assert!(skipped.is_empty());
     }
 

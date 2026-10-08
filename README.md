@@ -20,8 +20,8 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 
 * every heuristic, workaround, and guess is printed to the user, not swallowed;
 * a format that is only half-understood is exposed as half-understood;
-* nothing in the original game folder is ever modified — repairs are written
-  beside it;
+* nothing in the original game folder is ever modified — the folder is
+  read-only to this tool and every artifact is written outside it;
 * when the engine cannot do something, it says so and names the file, instead
   of producing something that looks like it worked.
 
@@ -39,9 +39,9 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Glaze — HD upscaling**: `nearest`, `bilinear`, `bicubic`, `lanczos3`, `anime4k` (Anime4K-style preset) | working |
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
-| **Translation write-back**: a repaired script written beside the original, byte-preserving and CP932-strict | working |
+| **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
-| **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built and smoke-tested in CI |
+| **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam №2…N** — other engines | the reason the body exists |
 | BlueGale **AMV** video | *not implemented* — an honest hole, see [research notes](docs/RESEARCH-BlueGale.md) |
 
@@ -53,7 +53,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 98 tests, all fixtures synthesized
+cargo test                                     # 110 tests, all fixtures synthesized
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
 cargo run -p kintsugi -- inspect ./demo-game
@@ -76,7 +76,7 @@ wrote synthetic demo game into demo-game:
   · demo-game/story.bdt
 
 detecting engine…
-●●● bluegale — 1 SNN archive(s) with valid INX indexes (4 entries)
+●●● bluegale — 1 SNN archive(s) with valid INX indexes (8 entries)
 
 playing story.bdt
   ————————————————————————
@@ -126,25 +126,33 @@ cargo run --release -p kintsugi -- translate "/path/to/game" \
 * `--mock` runs the whole pipeline offline, which is how the pipeline is
   tested without a network or a bill;
 * the translated script is applied to a **copy** in memory, and `--write-script`
-  writes a patch **beside** the original. Pointing it at the file being read is
-  refused outright (exit `2`) and the original is left byte-identical — the
-  promise is a check in the code, not a sentence in this file;
-* the patch is byte-preserving: labels, indentation, line endings, blank lines,
-  and anything the seam did not understand survive exactly, and only the lines
-  that were actually translated change. Lines whose id has no home in the
-  original file are reported, not dropped;
+  writes a patch **outside** the game folder. Writing inside it is refused
+  outright (exit `2`) — not only over the file being read, but over any other
+  original in there (`game.snn`, say) and for the glaze's output too. The
+  promise is a check in the code (`ensure_outside_game`), not a sentence in
+  this file. What it cannot see is a hard link to an original made *outside*
+  the folder: that needs file identity, which portable std does not expose, and
+  the hole is written down rather than half-patched;
+* the patch is byte-preserving **literally**: only the lines that were actually
+  translated are re-encoded, and every other byte is copied straight from the
+  original, so labels, indentation, line endings, blank lines and trailing
+  bytes survive exactly. This is not decoration — CP932 has hundreds of
+  characters with more than one valid spelling (the NEC and IBM duplicate rows
+  — `87 90` and `81 E0` are both `≒`), so re-encoding the whole file would
+  quietly re-spell lines nobody asked to touch. Lines whose id has no home in
+  the original file are reported, not dropped;
 * a translation the target code page cannot hold is **refused by name** (see
   the CP932 note below) rather than silently mangled.
 
 The offline path is the tested one, end to end:
 
 ```sh
-$ cargo run -p kintsugi -- translate demo-game --mock --no-play --write-script demo-game/story.en.bdt
+$ cargo run -p kintsugi -- translate demo-game --mock --no-play --write-script story.en.bdt
 extracted 9 line(s), including unclassified raw lines (ASCII command-like lines are passed through automatically)
 translating ja → en via mock
   total: 9/9 line(s) changed
   [warn] translated 9 line(s) via kintsugi-translate (0 skipped); source: story.bdt
-repaired script: demo-game/story.en.bdt (468 byte(s), 9/9 changed line(s))
+repaired script: story.en.bdt (468 byte(s), 9/9 changed line(s))
 ```
 
 ### Glazing pixels
@@ -177,10 +185,10 @@ cargo run --release -p kintsugi -- interpolate "/path/to/game" --factor 3 -o out
 ```
 
 ```
-$ cargo run -p kintsugi -- interpolate demo-game --factor 4 -o demo-game/frames
+$ cargo run -p kintsugi -- interpolate demo-game --factor 4 -o frames
 interpolated: 4 frame(s) → 13 frame(s) at ×4 (blend)
   sequence: cut01.zbm, cut02.zbm, cut03.zbm, cut04.zbm (5x3)
-  → demo-game/frames
+  → frames
 · not a frame: face.zbm (3x3, not 5x3 like the other frames)
 · not a frame: room.zbm (4x4, not 5x3 like the other frames)
 · not a frame: title.bbm (4x3, not 5x3 like the other frames)
@@ -298,7 +306,7 @@ the offline translator emit one of those characters:
 
 ```sh
 $ KINTSUGI_MOCK_MARKER='—' cargo run -p kintsugi -- translate demo-game \
-      --mock --no-play --write-script demo-game/story.en.bdt
+      --mock --no-play --write-script refusal.bdt
 extracted 9 line(s), including unclassified raw lines (ASCII command-like lines are passed through automatically)
 translating ja → en via mock
   total: 9/9 line(s) changed
@@ -306,8 +314,8 @@ translating ja → en via mock
 🏺 kintsugi: cannot write text as CP932: character(s) — are not in that code page, and substituting them would change the game's words
 $ echo $?
 1
-$ ls demo-game/story.en.bdt
-ls: demo-game/story.en.bdt: No such file or directory     # nothing was written
+$ ls refusal.bdt
+ls: refusal.bdt: No such file or directory     # nothing was written
 ```
 
 The failure names the exact characters, so the fix (reword the line, or add a

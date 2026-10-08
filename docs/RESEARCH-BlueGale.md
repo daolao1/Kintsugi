@@ -278,9 +278,11 @@ the fixtures are synthesized (§9).
 ## 9. How to re-verify these claims
 
 Everything runnable in-tree was run when this document was written (2026-10-08):
-`cargo build --workspace` builds, `cargo test -p kintsugi-bluegale` passes 26
-unit + 8 integration tests, and `cargo test -p kintsugi` adds 5 host-level patch
-tests (`crates/kintsugi/tests/patch.rs`).
+`cargo build --workspace` builds, `cargo test -p kintsugi-bluegale` passes 29
+unit + 10 integration tests, and `cargo test -p kintsugi` adds 5 host-level
+patch tests (`crates/kintsugi/tests/patch.rs`) plus 4 that run the CLI binary
+end to end (`crates/kintsugi/tests/cli.rs`, including the refusals that keep
+every write outside the game folder).
 
 `cargo run -p kintsugi -- demo` writes `game.inx`/`game.snn`/`story.bdt` into
 `demo-game/` (gitignored and regenerated, not checked in), prints the `certain`
@@ -288,9 +290,12 @@ INX/SNN verdict of §6, plays the script, and upscales the title screen to
 `demo-game/title-x4-anime4k.png`; `--dir DIR` writes elsewhere and `--auto`
 skips the prompt. The offline write path is
 `cargo run -p kintsugi -- translate ./demo-game --mock --auto --no-play
---write-script ./demo-game/out.bdt`, followed by `cargo run -p kintsugi -- play
-./demo-game --script out.bdt --auto`; diffing the two files must show only
-translated lines.
+--write-script out.bdt`; diffing `story.bdt` against it must show only
+translated lines. Note where `out.bdt` goes: the tool refuses to write inside
+`demo-game/` at all, so hearing the patch read back means copying it into a
+*scratch copy* of the game (`cp -r demo-game /tmp/kt-scratch && cp out.bdt
+/tmp/kt-scratch/story.bdt`, then `play /tmp/kt-scratch --auto`) — installing a
+patch is the user's decision, and no Kintsugi command does it for them.
 
 The checks that need no game are the tests. `roundtrip.rs` synthesizes a
 release, detects it as `certain`, mounts it, reads images, audio, and script,

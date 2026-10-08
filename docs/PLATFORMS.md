@@ -62,14 +62,22 @@ object EngineBridge {
 }
 ```
 
-Three contracts hold this boundary together, and each one has a test:
+Three contracts hold this boundary together. Both surfaces share one
+implementation of the first two (`caught` and `kintsugi_free` in
+`crates/kintsugi-android/src/lib.rs`), so the C ABI and the JNI bridge cannot
+drift apart in how they keep them, and the parts a test can reach have tests:
 
 1. **Ownership.** Every returned string is allocated by Rust and released by
    `kintsugi_free`. Rust allocated it, Rust frees it, same allocator.
    (`tests/c_abi.c` calls `free(NULL)` to prove the no-op path.)
-2. **No unwinding across the boundary.** Every entry point wraps its body in
-   `catch_unwind` and turns a panic into an error *string*; unwinding into a
-   JVM or a C caller is undefined behaviour.
+2. **No unwinding across the boundary.** Every entry point — the C ABI's
+   `guard` and the JNI bridge's `answer` — runs its whole body, argument
+   marshalling and `require` included, through the same `caught` helper, which
+   turns a panic into an error *string*; unwinding into a JVM or a C caller is
+   undefined behaviour. `caught` is unit-tested with a closure that panics on
+   purpose. The JNI functions themselves have **no** runtime test — there is no
+   JVM in CI — so their evidence is compilation plus the `nm` name check below,
+   not execution; the C ABI's green check does not stand in for them.
 3. **Errors are text, not NULL.** A failed repair is information the UI can
    show. `error: not found: '/nope'` beats a blank screen every time.
 
@@ -90,14 +98,30 @@ Scriptable behaviour, so a repair can run inside make/CI:
 
 Usage errors are separated from engine errors on purpose: `--faktur 4` should
 not look like a broken game file. One refusal sits in this class deliberately:
-pointing `--write-script` at the very file being read exits `2`, because
-overwriting an original is a mistake in the *request*, not a fault in the game —
-and the original is verified byte-identical afterwards (`same_file` in
+writing anything inside the game folder exits `2`, because overwriting an
+original is a mistake in the *request*, not a fault in the game — and the files
+there are verified byte-identical afterwards (`ensure_outside_game` in
 `crates/kintsugi/src/main.rs`).
+
+The rule is about the folder rather than about one file, because "do not
+overwrite the script you read" still allows `--write-script game/game.snn`, an
+original that merely is not the script. So the game folder is read-only to this
+tool: `--write-script`, `upscale -o`, and `interpolate -o` all refuse to land in
+it, and the message suggests a path beside it. `demo` is the exception that
+proves the rule — it *creates* its folder, leaves a `.kintsugi-demo` marker, and
+refuses to write into a folder that has files but no marker, so
+`demo --dir <a real game>` cannot plant fixtures over someone's installation.
+
+What the check cannot see is a hard link to an original made **outside** the
+folder (`ln game/story.bdt /tmp/other.bdt`): that is the same bytes under a
+second name, and catching it needs file identity (device + inode, or volume +
+file index), for which portable std has no call. The doc comment says that out
+loud instead of implying a guarantee it cannot keep.
 
 ## What CI verifies, per platform
 
-Every job builds and then **runs the artifact**:
+Every job builds its artifact, and every job whose artifact is a program
+**runs it**; the APK cannot be run here, so that job unpacks it instead:
 
 | job | checks |
 | --- | --- |

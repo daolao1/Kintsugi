@@ -16,6 +16,17 @@
 //! would make them static and flip this to `JClass`; the two are the same
 //! pointer at the ABI level, which is exactly why the mistake would go
 //! unnoticed at run time and should be spelled out here.)
+//!
+//! # What is verified, and how
+//!
+//! Compilation and the exported symbol *names* are checked (CI greps the built
+//! library with `nm`): a name mismatch is the classic Android
+//! `UnsatisfiedLinkError` at first launch. The *execution* of these functions
+//! is **not** covered by a test — there is no JVM in the test environment, and
+//! `crates/kintsugi-android/tests/c_abi.c` exercises the C entry points, not
+//! these. The no-unwinding rule below is shared with the C ABI ([`crate::caught`],
+//! unit-tested with a panicking closure); the marshalling around it is verified
+//! by reading it, not by running it.
 
 use jni::JNIEnv;
 use jni::objects::{JObject, JString};
@@ -38,11 +49,18 @@ fn give_string(env: &mut JNIEnv<'_>, text: String) -> jstring {
 }
 
 /// Run a bridge call and turn both success and failure into JVM text.
-fn answer(env: &mut JNIEnv<'_>, body: impl FnOnce() -> crate::Result<String>) -> jstring {
-    let text = match body() {
-        Ok(text) => text,
-        Err(e) => format!("error: {e}"),
-    };
+///
+/// The *whole* call runs inside [`crate::caught`] — argument marshalling and
+/// `require` included, not just the engine call — so a panic in the bridge
+/// itself cannot unwind into the JVM either. `caught` is the same helper the C
+/// ABI's `guard` uses, so neither surface can drift from the other.
+fn answer<'a>(
+    env: &mut JNIEnv<'a>,
+    body: impl FnOnce(&mut JNIEnv<'a>) -> crate::Result<String>,
+) -> jstring {
+    // The closure borrows `env` only for the length of the `caught` call; the
+    // borrow ends before `give_string` needs `env` again.
+    let text = crate::caught(|| body(&mut *env));
     give_string(env, text)
 }
 
@@ -52,8 +70,9 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_version(
     mut env: JNIEnv<'_>,
     _this: JObject<'_>,
 ) -> jstring {
-    let text = format!("kintsugi {}", env!("CARGO_PKG_VERSION"));
-    give_string(&mut env, text)
+    answer(&mut env, |_env| {
+        Ok(format!("kintsugi {}", env!("CARGO_PKG_VERSION")))
+    })
 }
 
 /// `EngineBridge.detect(dir: String): String`
@@ -63,8 +82,10 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_detect(
     _this: JObject<'_>,
     dir: JString<'_>,
 ) -> jstring {
-    let dir = take_string(&mut env, &dir);
-    answer(&mut env, move || crate::detect(&require(dir)?))
+    answer(&mut env, |env| {
+        let dir = require(take_string(env, &dir))?;
+        crate::detect(&dir)
+    })
 }
 
 /// `EngineBridge.play(dir: String, script: String?): String`
@@ -75,10 +96,10 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_play(
     dir: JString<'_>,
     script: JString<'_>,
 ) -> jstring {
-    let dir = take_string(&mut env, &dir);
-    let script = take_string(&mut env, &script);
-    answer(&mut env, move || {
-        crate::play(&require(dir)?, script.as_deref())
+    answer(&mut env, |env| {
+        let dir = require(take_string(env, &dir))?;
+        let script = take_string(env, &script);
+        crate::play(&dir, script.as_deref())
     })
 }
 
@@ -89,8 +110,10 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_demo(
     _this: JObject<'_>,
     dir: JString<'_>,
 ) -> jstring {
-    let dir = take_string(&mut env, &dir);
-    answer(&mut env, move || crate::demo(&require(dir)?))
+    answer(&mut env, |env| {
+        let dir = require(take_string(env, &dir))?;
+        crate::demo(&dir)
+    })
 }
 
 /// `EngineBridge.upscale(dir, asset, factor, method, outPath): String`
@@ -104,18 +127,12 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_upscale(
     method: JString<'_>,
     out_path: JString<'_>,
 ) -> jstring {
-    let dir = take_string(&mut env, &dir);
-    let asset = take_string(&mut env, &asset);
-    let method = take_string(&mut env, &method);
-    let out_path = take_string(&mut env, &out_path);
-    answer(&mut env, move || {
-        crate::upscale_asset(
-            &require(dir)?,
-            &require(asset)?,
-            factor.max(1) as u32,
-            &require(method)?,
-            &require(out_path)?,
-        )
+    answer(&mut env, |env| {
+        let dir = require(take_string(env, &dir))?;
+        let asset = require(take_string(env, &asset))?;
+        let method = require(take_string(env, &method))?;
+        let out_path = require(take_string(env, &out_path))?;
+        crate::upscale_asset(&dir, &asset, factor.max(1) as u32, &method, &out_path)
     })
 }
 
