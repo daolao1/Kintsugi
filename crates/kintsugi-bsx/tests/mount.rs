@@ -285,3 +285,92 @@ fn a_story_beside_no_archive_is_the_script_the_game_is_played_through() {
     assert_eq!(reread.strings()[5], "I will not go and look");
     assert_eq!(reread.strings()[0], "■■■　真理奈ＥＮＤ　■■■");
 }
+
+/// A story with a program table mounts into a walk with scenery and choices:
+/// the stage walk reads what the code says, and a repair still lands on the
+/// line it names because the same walk numbers the commands.
+#[test]
+fn a_staged_story_plays_with_its_scenery_and_repairs_by_id() {
+    use kintsugi_core::script::Command;
+
+    let mut source = kintsugi_core::vfs::MemorySource::new();
+    source.insert("exe/bsx.dat", kintsugi_bsx::fixtures::make_staged_story());
+    source.insert("graphics/bg01.bsg", b"a picture");
+    source.insert("bgm/bgm01.ogg", b"a tune");
+    source.insert("voice/10100001.ogg", b"a voice");
+    let mut vfs = kintsugi_core::vfs::Vfs::new();
+    vfs.push(std::sync::Arc::new(source));
+    let mount = kintsugi_bsx::plugin()
+        .mount(&vfs)
+        .expect("the staged story mounts");
+    let path = VirtualPath::new("exe/bsx.dat");
+    let script = mount.read_script(&path).expect("the staged story reads");
+
+    // The walk names the programs, sets the scene, offers the choice, and
+    // brings the branches back to the story.
+    assert!(
+        matches!(&script.commands[0], Command::Label(label) if label == "bsx:0:opening"),
+        "{:?}",
+        script.commands[0]
+    );
+    assert!(
+        script
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::SetBackground(p) if p == "graphics/bg01.bsg")),
+        "the background resolves through the archives: {:?}",
+        script.commands
+    );
+    assert!(
+        script
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::PlayMusic(Some(p)) if p == "bgm/bgm01.ogg")),
+        "the music resolves"
+    );
+    assert!(
+        script
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::PlaySound(p) if p == "voice/10100001.ogg")),
+        "the voice resolves"
+    );
+    let choice = script
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            Command::Choice(options) => Some(options),
+            _ => None,
+        })
+        .expect("the choice is offered");
+    assert_eq!(choice[0].label, "pick the first branch");
+    assert_eq!(choice[0].goto, "bsx:1:branch_a");
+    assert!(
+        script
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::Jump(label) if label == "bsx:3:merge")),
+        "a branch returns to the story"
+    );
+    assert!(
+        script.warnings[0].contains("program table"),
+        "{:?}",
+        script.warnings
+    );
+
+    // A repair lands by command id on the line that command shows, through
+    // the same walk the reading took.
+    let id = script
+        .commands
+        .iter()
+        .position(|c| matches!(c, Command::Narration(text) if text == "line zero"))
+        .expect("the line is a command");
+    let replacements = std::collections::BTreeMap::from([(id, String::from("第零行"))]);
+    let written = mount
+        .write_script(&path, &replacements)
+        .expect("the repair writes");
+    assert_eq!(written.replaced, 1);
+    let reread = kintsugi_bsx::Story::parse(&written.script).expect("a repair is a story");
+    assert_eq!(reread.strings()[0], "第零行");
+    assert_eq!(reread.strings()[3], "line three", "no other line moves");
+}

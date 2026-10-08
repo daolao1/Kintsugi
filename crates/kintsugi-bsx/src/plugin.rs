@@ -374,56 +374,13 @@ impl EngineMount for BsxMount {
             detail: refused.to_string(),
         })?;
 
-        // The code decides what a line is shown as and in what order. Reading
-        // the table in index order would be reading the dictionary rather than
-        // the book, which is what this seam used to do and said so about.
-        let plan = command_plan(&story);
-        let shows = story.shows();
-        let mut narration = 0usize;
-        let mut dialogue = 0usize;
+        // One walk of the code feeds both reading and repairing, so a
+        // command id cannot drift between the translation that names it and
+        // the repair that lands on it.
+        let plan = self.plan(&story);
         let mut script = Script::new(path.clone());
-        for (channel, line) in &plan {
-            let text = story.strings()[*line].clone();
-            match channel {
-                Some(0) => {
-                    narration += 1;
-                    script.commands.push(Command::Narration(text));
-                }
-                Some(_) => {
-                    dialogue += 1;
-                    script.commands.push(Command::Dialogue {
-                        speaker: None,
-                        text,
-                    });
-                }
-                // Shown by nothing the code says: the words are real, the kind
-                // is not known, and the body has a variant for exactly that.
-                None => script.commands.push(Command::RawLine(text)),
-            }
-        }
-
-        let runs = shows
-            .windows(2)
-            .filter(|pair| pair[1].line != pair[0].line + 1)
-            .count()
-            + usize::from(!shows.is_empty());
-        script.warnings.push(format!(
-            "{} line(s) of story in the order the code shows them: {narration} on the narration \
-             channel and {dialogue} on a dialogue channel, from {} show instruction(s) in {runs} \
-             run(s) of consecutive lines. The channel says which text box the game draws, not who \
-             is speaking, so no line is given a speaker. A branch is not decoded: the runs are \
-             walked one after the other, so this is every line in the order the story can reach \
-             it, not one playthrough.{}",
-            story.strings().len(),
-            shows.len(),
-            match command_plan(&story).len() - shows.len() {
-                0 => String::new(),
-                kept => format!(
-                    " {kept} line(s) the code never shows are kept at the end as raw lines rather \
-                     than dropped."
-                ),
-            }
-        ));
+        script.commands = plan.commands;
+        script.warnings = plan.warnings;
         Ok(script)
     }
 
@@ -468,12 +425,13 @@ impl EngineMount for BsxMount {
         // `read_script` handed over, so the same walk of the code turns an id
         // back into the line a repair can move. A story is read the same way
         // twice, which is what makes a repair land on the words it names.
-        let plan = command_plan(&story);
+        let plan = self.plan(&story);
+        let line_of: BTreeMap<usize, usize> = plan.text.iter().copied().collect();
         let mut wanted: BTreeMap<usize, String> = BTreeMap::new();
         let mut unmatched = Vec::new();
         let mut clashes = Vec::new();
         for (id, text) in replacements {
-            let Some((_, line)) = plan.get(*id).copied() else {
+            let Some(line) = line_of.get(id).copied() else {
                 unmatched.push(*id);
                 continue;
             };
@@ -526,23 +484,191 @@ impl EngineMount for BsxMount {
     }
 }
 
-/// The commands [`BsxPlugin::read_script`] hands over, in order: every line the
-/// code shows, then the lines it never shows.
+/// What a story walks into: the commands [`BsxPlugin::read_script`] hands
+/// over, the map from a command's position to the story line it shows — the
+/// ids a translation carries — and the seam's warnings.
 ///
 /// This is the one place that decides what a command id means. Reading and
-/// repairing both go through it, so an id cannot drift between the translation
-/// that names it and the repair that has to land on it.
-fn command_plan(story: &Story) -> Vec<(Option<u8>, usize)> {
-    let shows = story.shows();
-    let shown: BTreeSet<usize> = shows.iter().map(|show| show.line).collect();
-    let mut plan: Vec<(Option<u8>, usize)> = shows
-        .iter()
-        .map(|show| (Some(show.channel), show.line))
-        .collect();
-    for line in 0..story.strings().len() {
-        if !shown.contains(&line) {
-            plan.push((None, line));
+/// repairing both go through it, so an id cannot drift between the
+/// translation that names it and the repair that has to land on it.
+struct Plan {
+    commands: Vec<Command>,
+    text: Vec<(usize, usize)>,
+    warnings: Vec<String>,
+}
+
+impl BsxMount {
+    /// The one walk of a story both reading and repairing trust: the stage
+    /// walk when the code offers its program table, the text walk when it
+    /// does not.
+    fn plan(&self, story: &Story) -> Plan {
+        match self.plan_staged(story) {
+            Some(plan) => plan,
+            None => self.plan_flat(story),
         }
     }
-    plan
+
+    /// The stage walk: programs in file order, the scenery the code sets,
+    /// and the choices, all read from the instructions the seam has proven.
+    fn plan_staged(&self, story: &Story) -> Option<Plan> {
+        let programs = crate::stage::programs(story)?;
+        let names = crate::stage::resources(story).unwrap_or_default();
+        let (resolver, collisions) = self.resource_resolver();
+        let emission = crate::stage::emit(story, &programs, &names, &resolver);
+
+        let count =
+            |pick: fn(&Command) -> bool| emission.commands.iter().filter(|c| pick(c)).count();
+        let shown = count(|c| matches!(c, Command::Narration(_) | Command::Dialogue { .. }));
+        let choices = count(|c| matches!(c, Command::Choice(_)));
+        let backgrounds = count(|c| matches!(c, Command::SetBackground(_)));
+        let music = count(|c| matches!(c, Command::PlayMusic(Some(_))));
+        let sounds = count(|c| matches!(c, Command::PlaySound(_)));
+
+        let mut notes = emission.notes;
+        if names.is_empty() {
+            notes.push(
+                "the resource name table was not found in this story, so the code's resource \
+                 instructions play nameless: no backgrounds, no music, no voices."
+                    .to_string(),
+            );
+        }
+        if collisions > 0 {
+            notes.push(format!(
+                "{collisions} resource name(s) match more than one file in the archives with no \
+                 rule to choose between them, and are skipped rather than guessed."
+            ));
+        }
+        let warnings = vec![format!(
+            "{} program(s) are read from the code's program table and played in file order: \
+             {shown} line(s) shown in place, {choices} choice(s) that branch and rejoin, and the \
+             scenery the code sets — {backgrounds} background(s), {music} music cue(s), {sounds} \
+             sound(s) and voice(s) — resolved by resource name. The channel byte still says \
+             which box the game draws, not who is speaking, so no line is given a speaker. The \
+             instruction that calls one program from another is not yet decoded, so this is \
+             every program walked once — the endings and replays the release only reaches on \
+             its own terms play straight through here — not one playthrough. Choice labels are \
+             shown but not yet offered to the translator.{}",
+            programs.len(),
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", notes.join(" "))
+            }
+        )];
+        Some(Plan {
+            commands: emission.commands,
+            text: emission.text,
+            warnings,
+        })
+    }
+
+    /// The text walk: only the show instructions, in code order, when the
+    /// program table is absent or fails its self-check. Every line, honestly
+    /// typed, in the order the story can reach it.
+    fn plan_flat(&self, story: &Story) -> Plan {
+        let shows = story.shows();
+        let shown: BTreeSet<usize> = shows.iter().map(|show| show.line).collect();
+        let mut commands = Vec::new();
+        let mut text = Vec::new();
+        let mut narration = 0usize;
+        let mut dialogue = 0usize;
+        for show in &shows {
+            let line = story.strings()[show.line].clone();
+            text.push((commands.len(), show.line));
+            if show.channel == 0 {
+                narration += 1;
+                commands.push(Command::Narration(line));
+            } else {
+                dialogue += 1;
+                commands.push(Command::Dialogue {
+                    speaker: None,
+                    text: line,
+                });
+            }
+        }
+        let mut kept = 0usize;
+        for (line, words) in story.strings().iter().enumerate() {
+            if !shown.contains(&line) {
+                // Shown by nothing the code says: the words are real, the
+                // kind is not known, and the body has a variant for that.
+                text.push((commands.len(), line));
+                commands.push(Command::RawLine(words.clone()));
+                kept += 1;
+            }
+        }
+
+        let runs = shows
+            .windows(2)
+            .filter(|pair| pair[1].line != pair[0].line + 1)
+            .count()
+            + usize::from(!shows.is_empty());
+        let warnings = vec![format!(
+            "{} line(s) of story in the order the code shows them: {narration} on the narration \
+             channel and {dialogue} on a dialogue channel, from {} show instruction(s) in {runs} \
+             run(s) of consecutive lines. The channel says which text box the game draws, not who \
+             is speaking, so no line is given a speaker. A branch is not decoded: the runs are \
+             walked one after the other, so this is every line in the order the story can reach \
+             it, not one playthrough.{}",
+            story.strings().len(),
+            shows.len(),
+            match kept {
+                0 => String::new(),
+                kept => format!(
+                    " {kept} line(s) the code never shows are kept at the end as raw lines rather \
+                     than dropped."
+                ),
+            }
+        )];
+        Plan {
+            commands,
+            text,
+            warnings,
+        }
+    }
+
+    /// Resource names are bare stems; the archives hold the files. The map
+    /// from one to the other is built from what the game actually carries: a
+    /// name that matches nothing resolves to nothing, and a name that matches
+    /// two files resolves to the engine's own format when only one of them is
+    /// in it — otherwise to nothing. A guess is not a repair.
+    fn resource_resolver(&self) -> (impl Fn(&str) -> Option<String>, usize) {
+        let mut by_stem: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, _size) in self.vfs.list() {
+            let name = path.to_string();
+            let Some(filename) = name.rsplit('/').next() else {
+                continue;
+            };
+            let Some((stem, _extension)) = filename.rsplit_once('.') else {
+                continue;
+            };
+            by_stem.entry(stem.to_lowercase()).or_default().push(name);
+        }
+        let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+        let mut collisions = 0usize;
+        for (stem, paths) in by_stem {
+            let chosen = match paths.as_slice() {
+                [only] => Some(only.clone()),
+                many => {
+                    let native: Vec<&String> = many
+                        .iter()
+                        .filter(|path| path.to_lowercase().ends_with(".bsg"))
+                        .collect();
+                    match native.as_slice() {
+                        [only] => Some((*only).clone()),
+                        _ => None,
+                    }
+                }
+            };
+            match chosen {
+                Some(path) => {
+                    resolved.insert(stem, path);
+                }
+                None => collisions += 1,
+            }
+        }
+        (
+            move |name: &str| resolved.get(&name.to_lowercase()).cloned(),
+            collisions,
+        )
+    }
 }

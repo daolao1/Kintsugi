@@ -46,7 +46,7 @@ const SHOW_OPCODE: u8 = 0x1A;
 /// every other value occurs exactly once, with line number 0 — the shape of a
 /// coincidence rather than of an instruction. Those three cover 11,840 of the
 /// story's 11,864 lines.
-const SHOW_CHANNELS: u8 = 3;
+pub(crate) const SHOW_CHANNELS: u8 = 3;
 
 /// One line the code shows, and where in the code it says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,9 +61,9 @@ pub struct Show {
 
 /// One `(offset, size)` pair of the record list.
 #[derive(Clone, Copy, Debug)]
-struct Record {
-    at: usize,
-    len: usize,
+pub(crate) struct Record {
+    pub(crate) at: usize,
+    pub(crate) len: usize,
 }
 
 /// A string table: an index of block-relative offsets, then the block.
@@ -102,6 +102,7 @@ pub struct Story {
     bytes: Vec<u8>,
     table: Table,
     strings: Vec<String>,
+    records: Vec<Record>,
 }
 
 impl Story {
@@ -147,6 +148,7 @@ impl Story {
             bytes: bytes.to_vec(),
             table,
             strings,
+            records,
         })
     }
 
@@ -158,6 +160,34 @@ impl Story {
     /// The bytes this story was read from.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The record list, for the stage walk in [`crate::stage`].
+    pub(crate) fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    /// Where the story's own index sits, so the stage never mistakes it for
+    /// the resource names.
+    pub(crate) fn table_index_at(&self) -> usize {
+        self.table.index_at
+    }
+
+    /// Where the code region begins, from the header's seventh number.
+    pub(crate) fn code_base(&self) -> usize {
+        let at = 0x28;
+        if self.bytes.len() >= at + 4 {
+            let base = u32::from_le_bytes([
+                self.bytes[at],
+                self.bytes[at + 1],
+                self.bytes[at + 2],
+                self.bytes[at + 3],
+            ]) as usize;
+            if base < self.bytes.len() {
+                return base;
+            }
+        }
+        0x110
     }
 
     /// Every line the code shows, in the order the code shows them.

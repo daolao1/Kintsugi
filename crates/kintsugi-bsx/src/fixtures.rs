@@ -282,6 +282,151 @@ pub fn make_story_showing(lines: &[&str], shows: &[(u8, usize)]) -> Vec<u8> {
     out
 }
 
+/// A story with a program table, resource names, and a branch: the shape the
+/// stage walk reads. Four programs — an opening that sets a background, starts
+/// the music, voices a line and offers a choice, two branch programs, and the
+/// program the story continues with — so the walk's tests need nothing from a
+/// real game.
+pub fn make_staged_story() -> Vec<u8> {
+    let lines = [
+        "line zero",
+        "pick the first branch",
+        "pick the second branch",
+        "line three",
+        "branch A text",
+        "branch B text",
+        "the merge",
+        "never shown",
+    ];
+    let program_names = ["opening", "branch_a", "branch_b", "merge"];
+    let resource_names = ["se01", "bgm01", "bg01", "10100001"];
+
+    // The code: hand-assembled in the measured instruction shapes.
+    let mut code = Vec::new();
+    let mut program_starts = Vec::new();
+    // opening
+    program_starts.push(code.len());
+    code.extend_from_slice(&[0x31, 0, 0, 0, 0]); // program 0
+    code.extend_from_slice(&[0x08, 1, 0, 0, 0]); // resource 1 = bgm01
+    code.extend_from_slice(&[0x08, 2, 0, 0, 0]); // resource 2 = bg01
+    code.push(0x00); // the filler byte the release is full of
+    code.extend_from_slice(&[0x02, 0, 0, 0, 3, 0, 0, 0]); // voice: resource 3
+    code.extend_from_slice(&[0x1A, 0, 0, 0, 0, 0]); // show line 0, narration
+    code.extend_from_slice(&[0x1A, 1, 3, 0, 0, 0]); // show line 3, dialogue
+    code.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]); // id 0 -> program 1, label line 1
+    code.extend_from_slice(&[0x2C, 1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0]); // id 1 -> program 2, label line 2
+    code.extend_from_slice(&[0x2D, 0xFF, 0xFF, 0xFF, 0xFF]);
+    code.push(0x09);
+    // branch_a
+    program_starts.push(code.len());
+    code.extend_from_slice(&[0x31, 1, 0, 0, 0]);
+    code.extend_from_slice(&[0x1A, 2, 4, 0, 0, 0]); // show line 4
+    code.push(0x09);
+    // branch_b
+    program_starts.push(code.len());
+    code.extend_from_slice(&[0x31, 2, 0, 0, 0]);
+    code.extend_from_slice(&[0x1A, 1, 5, 0, 0, 0]); // show line 5
+    code.push(0x30);
+    // merge
+    program_starts.push(code.len());
+    code.extend_from_slice(&[0x31, 3, 0, 0, 0]);
+    code.extend_from_slice(&[0x1A, 0, 6, 0, 0, 0]); // show line 6
+    code.push(0x09);
+
+    // The header, the directory reserved, then the code at the base the
+    // header names.
+    let mut out = crate::SCRIPT_MAGIC.to_vec();
+    out.extend_from_slice(b" Rev.6\0\0");
+    for number in [0x100u32, 2, 0x18, 4, 0xc, 0xe, 0x110] {
+        out.extend_from_slice(&number.to_le_bytes());
+    }
+    debug_assert_eq!(out.len(), DIRECTORY_START);
+    let directory = out.len();
+    out.resize(directory + 7 * 8, 0);
+    out.resize(0x110, 0);
+    let code_at = out.len();
+    out.extend_from_slice(&code);
+    let mut records = [(0usize, 0usize); 7];
+    records[0] = (code_at, code.len());
+
+    // The program table: (code offset, name offset) pairs. The names follow
+    // after an eight-byte gap so no directory window reads the pair as a
+    // string table.
+    let names_block_at = out.len() + 8 + (program_starts.len() * 8).div_ceil(8) * 8;
+    let mut name_offsets = Vec::new();
+    let mut names_block = Vec::new();
+    for name in program_names {
+        name_offsets.push(names_block_at + names_block.len());
+        names_block.extend_from_slice(&crate::encode_cp932(name).unwrap_or_default());
+        names_block.push(0);
+    }
+    let table_at = out.len();
+    let mut table = Vec::new();
+    for (i, start) in program_starts.iter().enumerate() {
+        table.extend_from_slice(&(*start as u32).to_le_bytes());
+        table.extend_from_slice(&(name_offsets[i] as u32).to_le_bytes());
+    }
+    out.extend_from_slice(&table);
+    records[1] = (table_at, table.len());
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    // The deliberate gap: the table and its names must not sit adjacent, or
+    // the story-table detector would read the pair as one more string table.
+    out.resize(out.len() + 8, 0);
+    let names_at = out.len();
+    debug_assert_eq!(names_at, names_block_at);
+    out.extend_from_slice(&names_block);
+    records[2] = (names_at, names_block.len());
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+
+    // The resource names: an index of block-relative offsets, then the block.
+    let mut resource_index = Vec::new();
+    let mut resource_block = Vec::new();
+    for name in resource_names {
+        resource_index.extend_from_slice(&(resource_block.len() as u32).to_le_bytes());
+        resource_block.extend_from_slice(&crate::encode_cp932(name).unwrap_or_default());
+        resource_block.push(0);
+    }
+    let resource_index_at = out.len();
+    out.extend_from_slice(&resource_index);
+    records[3] = (resource_index_at, resource_index.len());
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    let resource_block_at = out.len();
+    out.extend_from_slice(&resource_block);
+    records[4] = (resource_block_at, resource_block.len());
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+
+    // The story itself: index and block adjacent, the block last — the one
+    // adjacency `find_story` trusts.
+    let mut story_index = Vec::new();
+    let mut story_block = Vec::new();
+    for line in lines {
+        story_index.extend_from_slice(&(story_block.len() as u32).to_le_bytes());
+        story_block.extend_from_slice(&crate::encode_cp932(line).unwrap_or_default());
+        story_block.push(0);
+    }
+    let story_index_at = out.len();
+    out.extend_from_slice(&story_index);
+    records[5] = (story_index_at, story_index.len());
+    let story_block_at = out.len();
+    out.extend_from_slice(&story_block);
+    records[6] = (story_block_at, story_block.len());
+
+    for (slot, (offset, size)) in records.into_iter().enumerate() {
+        let at = directory + slot * 8;
+        out[at..at + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+        out[at + 4..at + 8].copy_from_slice(&(size as u32).to_le_bytes());
+    }
+    out
+}
+
 /// A `bsx.dat` with a story in it, for the tests and the demo game.
 pub fn make_bsx_dat() -> Vec<u8> {
     make_story(&[

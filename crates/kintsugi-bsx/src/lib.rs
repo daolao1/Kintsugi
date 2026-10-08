@@ -49,6 +49,7 @@ pub mod fixtures;
 pub mod image;
 pub mod plugin;
 pub mod script;
+pub mod stage;
 
 pub use plugin::{ENGINE_ID, plugin};
 pub use script::{SCRIPT_MAGIC, Show, Story};
