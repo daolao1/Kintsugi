@@ -81,6 +81,36 @@ enum Anchor {
     Call { at: usize, target: usize },
 }
 
+/// The guarded regions of a program: `02|03 01 <var> <op> 01 <value> 06
+/// <rel32>` — a condition twelve bytes long, then the guard instruction,
+/// whose forward target is `rel` past the code base. The bytes between the
+/// guard and its target run only when the condition holds (measured on the
+/// release: all 92 `06` sites carry exactly this preamble, every target
+/// forward). The walk never evaluates the condition; it only needs to know
+/// WHICH bytes a condition owns.
+fn guard_regions(bytes: &[u8], program: &Program, base: usize) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut at = program.start;
+    while at + 17 <= program.end {
+        let matches = matches!(bytes.get(at), Some(0x02) | Some(0x03))
+            && bytes.get(at + 1) == Some(&0x01)
+            && bytes.get(at + 7) == Some(&0x01)
+            && bytes.get(at + 12) == Some(&0x06);
+        if matches {
+            if let Some(rel) = u32_at(bytes, at + 13) {
+                let target = base.saturating_add(rel);
+                if at + 17 < target {
+                    regions.push((at + 17, target.min(program.end)));
+                    at += 17;
+                    continue;
+                }
+            }
+        }
+        at += 1;
+    }
+    regions
+}
+
 /// The channel bytes the voice instruction has been measured to use.
 const VOICE_CHANNELS: [u8; 8] = [1, 2, 3, 6, 7, 8, 18, 19];
 
@@ -510,8 +540,58 @@ pub fn emit(
         }
     }
 
+    // The ending cards. The compiler numbered them first — lines 0..5 of the
+    // measured story — and placed their programs in front of the story, so a
+    // plain address-order read opens with the endings. But every one of
+    // those lines is shown from inside a route guard (`02|03 01 <var> <op>
+    // 01 <value> 06 <rel>`, measured at all 92 sites of the release): the
+    // code plays them at the END of a playthrough, and only when its
+    // condition holds. The walk cannot evaluate the guard, but it can see
+    // the guard — so a program whose every shown line is guard-gated is the
+    // ending of a route, and the honest place to read it is after the story
+    // it ends. Programs with no lines (menus, preloaders, replay stubs)
+    // stay where they lie.
+    let regions_of: Vec<Vec<(usize, usize)>> = programs
+        .iter()
+        .map(|program| guard_regions(story.bytes(), program, story.code_base()))
+        .collect();
+    let movers: Vec<usize> = (0..programs.len())
+        .filter(|position| {
+            let anchors = &all_anchors[*position];
+            let shows: Vec<usize> = anchors
+                .iter()
+                .filter_map(|anchor| match anchor {
+                    Anchor::Show { at, .. } => Some(*at),
+                    _ => None,
+                })
+                .collect();
+            !shows.is_empty()
+                && !anchors
+                    .iter()
+                    .any(|anchor| matches!(anchor, Anchor::Offer { .. }))
+                && shows.iter().all(|at| {
+                    regions_of[*position]
+                        .iter()
+                        .any(|(start, end)| *start <= *at && at < end)
+                })
+        })
+        .collect();
+    if !movers.is_empty() {
+        notes.push(format!(
+            "{} program(s) show every line they have inside route guards the walk reads but \
+             does not evaluate — the ending cards of a playthrough — so they are read after \
+             the story, not where the compiler placed them.",
+            movers.len()
+        ));
+    }
+    let emission_order: Vec<usize> = (0..programs.len())
+        .filter(|position| !movers.contains(position))
+        .chain(movers.iter().copied())
+        .collect();
+
     let mut unresolved_merges = 0usize;
-    for (position, program) in programs.iter().enumerate() {
+    for position in emission_order {
+        let program = &programs[position];
         commands.push(Command::Label(program_label(
             program.index,
             program.name.as_deref(),
@@ -620,7 +700,8 @@ pub fn emit(
     if links > 0 {
         notes.push(format!(
             "{links} program-to-program link(s) are read from tail calls; the conditional and \
-             mid-program calls (the guard instruction is not decoded) are noted but not followed."
+             mid-program calls — the ones sitting inside a guard's region, whose condition \
+             the walk reads for placement but never evaluates — are noted but not followed."
         ));
     }
     if backward_links > 0 {
