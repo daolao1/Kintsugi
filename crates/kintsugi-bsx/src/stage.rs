@@ -777,9 +777,13 @@ mod tests {
     fn the_program_table_is_found_by_its_own_markers() {
         let story = staged();
         let programs = programs(&story).expect("the fixture carries a program table");
-        assert_eq!(programs.len(), 4);
-        assert_eq!(programs[0].name.as_deref(), Some("opening"));
-        assert_eq!(programs[1].name.as_deref(), Some("branch_a"));
+        assert_eq!(programs.len(), 5);
+        // The walk orders programs by address, not by the table: the ending
+        // is table program 4 but the first bytes of the code.
+        assert_eq!(programs[0].name.as_deref(), Some("ending"));
+        assert_eq!(programs[0].index, 4);
+        assert_eq!(programs[1].name.as_deref(), Some("opening"));
+        assert_eq!(programs[2].name.as_deref(), Some("branch_a"));
         assert!(programs[0].start < programs[1].start);
         assert!(programs[1].start < programs[2].start);
     }
@@ -808,6 +812,7 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // The story in order, then the guarded ending after it.
         assert_eq!(
             text_of,
             vec![
@@ -815,8 +820,17 @@ mod tests {
                 "line three",
                 "branch A text",
                 "branch B text",
-                "the merge"
+                "the merge",
+                "the ending"
             ]
+        );
+        assert!(
+            emission
+                .notes
+                .iter()
+                .any(|note| note.contains("ending cards")),
+            "the reorder explains itself: {:?}",
+            emission.notes
         );
         // The scenery arrives before its line.
         let first_bg = emission
@@ -934,9 +948,14 @@ mod tests {
             "the unshown line is kept"
         );
         // And the text map still names every command a translation may move:
-        // five shown, one kept, and the two labels under their choice's id.
+        // five shown, the guarded ending, one kept, and the two labels under
+        // their choice's id.
         let lines: Vec<usize> = emission.text.iter().map(|(_, line)| *line).collect();
-        assert_eq!(lines.len(), 8, "five shown, one kept, two choice labels");
+        assert_eq!(
+            lines.len(),
+            9,
+            "five shown, one ending, one kept, two choice labels"
+        );
         let choice = emission
             .commands
             .iter()

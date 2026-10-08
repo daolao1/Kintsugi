@@ -297,15 +297,30 @@ pub fn make_staged_story() -> Vec<u8> {
         "branch B text",
         "the merge",
         "never shown",
+        "the ending",
     ];
-    let program_names = ["opening", "branch_a", "branch_b", "merge"];
+    let program_names = ["opening", "branch_a", "branch_b", "merge", "ending"];
     let resource_names = ["se01", "bgm01", "bg01", "10100001"];
 
     // The code: hand-assembled in the measured instruction shapes.
     let mut code = Vec::new();
-    let mut program_starts = Vec::new();
+    let mut program_starts = vec![0usize; 4];
+    // The ending sits where the compiler put the real ones: first in the
+    // code, last in the table (it is entered as table program 4), every line
+    // it shows inside a route guard — `02 01 <var> <op> 01 <value> 06 <rel>`
+    // — whose target skips the card when the route was not taken. The walk
+    // reads the guard for placement and the program moves after the story.
+    let ending_start = code.len();
+    code.extend_from_slice(&[0x31, 4, 0, 0, 0]); // program 4
+    // guard: var[0] == 1, else jump past the card (rel 0x1d -> just after
+    // this program, which starts at the code base 0x110)
+    code.extend_from_slice(&[
+        0x02, 0x01, 0, 0, 0, 0, 0x01, 0x01, 1, 0, 0, 0, 0x06, 0x1d, 0, 0, 0,
+    ]);
+    code.extend_from_slice(&[0x1A, 0, 8, 0, 0, 0]); // show line 8, narration
+    code.push(0x09);
     // opening
-    program_starts.push(code.len());
+    program_starts[0] = code.len();
     code.extend_from_slice(&[0x31, 0, 0, 0, 0]); // program 0
     code.extend_from_slice(&[0x08, 1, 0, 0, 0]); // resource 1 = bgm01
     code.extend_from_slice(&[0x08, 2, 0, 0, 0]); // resource 2 = bg01
@@ -321,18 +336,18 @@ pub fn make_staged_story() -> Vec<u8> {
     code.extend_from_slice(&[0x03, 1, 0, 0, 0]);
     code.push(0x09);
     // branch_a
-    program_starts.push(code.len());
+    program_starts[1] = code.len();
     code.extend_from_slice(&[0x31, 1, 0, 0, 0]);
     code.extend_from_slice(&[0x1A, 2, 4, 0, 0, 0]); // show line 4
     code.extend_from_slice(&[0x03, 3, 0, 0, 0]); // ends by entering the merge
 
     // branch_b
-    program_starts.push(code.len());
+    program_starts[2] = code.len();
     code.extend_from_slice(&[0x31, 2, 0, 0, 0]);
     code.extend_from_slice(&[0x1A, 1, 5, 0, 0, 0]); // show line 5
     code.push(0x30);
     // merge
-    program_starts.push(code.len());
+    program_starts[3] = code.len();
     code.extend_from_slice(&[0x31, 3, 0, 0, 0]);
     code.extend_from_slice(&[0x1A, 0, 6, 0, 0, 0]); // show line 6
     code.push(0x09);
@@ -356,7 +371,7 @@ pub fn make_staged_story() -> Vec<u8> {
     // The program table: (code offset, name offset) pairs. The names follow
     // after an eight-byte gap so no directory window reads the pair as a
     // string table.
-    let names_block_at = (out.len() + program_starts.len() * 8).next_multiple_of(8) + 8;
+    let names_block_at = (out.len() + program_names.len() * 8).next_multiple_of(8) + 8;
     let mut name_offsets = Vec::new();
     let mut names_block = Vec::new();
     for name in program_names {
@@ -366,7 +381,9 @@ pub fn make_staged_story() -> Vec<u8> {
     }
     let table_at = out.len();
     let mut table = Vec::new();
-    for (i, start) in program_starts.iter().enumerate() {
+    let mut starts_in_table_order = program_starts.clone();
+    starts_in_table_order.push(ending_start);
+    for (i, start) in starts_in_table_order.iter().enumerate() {
         table.extend_from_slice(&(*start as u32).to_le_bytes());
         table.extend_from_slice(&(name_offsets[i] as u32).to_le_bytes());
     }
