@@ -1243,8 +1243,12 @@ fn the_shell_works_on_a_second_engine_it_was_never_told_about() {
         "the archive's entries should be visible under the archive's name: {text}"
     );
     assert!(
-        text.contains("no script found"),
-        "this seam cannot read BSScript yet and must say so rather than guess: {text}"
+        text.contains("source: exe/bsx.dat"),
+        "the seam names the story this engine plays: {text}"
+    );
+    assert!(
+        text.contains("真理奈ＥＮＤ"),
+        "and hands its lines over rather than listing the file and stopping: {text}"
     );
 
     // The point of the whole exercise: a picture out of a 2008 container,
@@ -1276,33 +1280,50 @@ fn the_shell_works_on_a_second_engine_it_was_never_told_about() {
 }
 
 #[test]
-fn a_script_the_seam_cannot_read_leaves_nothing_behind() {
+fn a_story_is_translated_and_the_repair_never_touches_the_game() {
     let temp = TempDir::new("second-engine-script");
     let game = temp.0.join("game");
     kintsugi_bsx::fixtures::write_demo_game(&game).unwrap();
     let before = listing(&game.join("exe"));
-    let out = temp.0.join("translated.bdt");
+    let out = temp.0.join("translated.dat");
 
     let output = run(&[
         "translate",
         game.to_str().unwrap(),
         "--mock",
+        "--no-play",
         "--write-script",
         out.to_str().unwrap(),
     ]);
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "a seam that cannot read the script is a refusal, not a crash: {}",
+    assert!(
+        output.status.success(),
+        "a story this seam can read translates: {}",
         stderr(&output)
     );
+
+    // The repair is a story in the engine's own format, written outside the
+    // game folder, and the game itself is byte-for-byte what it was.
+    let repaired = fs::read(&out).expect("the repaired script is written");
+    assert_eq!(
+        &repaired[..8],
+        b"BSScript",
+        "a repair is this engine's format"
+    );
+    let story = kintsugi_bsx::Story::parse(&repaired).expect("a repair reads back as a story");
+    assert_eq!(story.strings().len(), 6);
     assert!(
-        !out.exists(),
-        "a refused translation must not leave a file behind"
+        story.strings()[0].contains("真理奈ＥＮＤ"),
+        "the line is still the line it replaces, with the translation in it: {}",
+        story.strings()[0]
+    );
+    assert_ne!(
+        story.strings()[0],
+        "■■■　真理奈ＥＮＤ　■■■",
+        "and the translation is in it"
     );
     assert_eq!(
         listing(&game.join("exe")),
         before,
-        "a refused translation must not touch the game"
+        "nothing in the game folder is written to"
     );
 }

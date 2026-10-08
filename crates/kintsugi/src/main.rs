@@ -5,6 +5,7 @@
 //! No arguments prints the usage; start with `kintsugi demo`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -386,6 +387,26 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     // which is a different thing with a confusingly similar name. Naming the
     // game's script is optional — the seam picks when it can.
     let target = pick_script(original_mount.as_ref(), args.flag("as"))?;
+
+    // `install` copies a game *folder* and puts the repair inside the copy. A
+    // disc image is not a folder, and the repair cannot go into the image — but
+    // it does not have to: a folder holding the image and the repaired script
+    // is a game whose loose script shadows the one in the image, which is how a
+    // disc-image repair is mounted at all. Said here, with the path the seam
+    // itself named, because the host is not supposed to know what a script in
+    // this engine is called.
+    if !Path::new(dir).is_dir() {
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "'{dir}' is a game image, not a folder: install copies a folder and writes the \
+                 repair into the copy. Put the image in a folder of its own with the repaired \
+                 script at '{target}' beside it — a loose file shadows the image's own copy, \
+                 which is how a disc image is played with a repair — and install into a copy of \
+                 that folder instead"
+            ),
+        )));
+    }
 
     // The script may be a file in the game folder or an entry inside one of its
     // archives, and both are repairable: a seam that serves a script says which
@@ -1298,10 +1319,83 @@ impl Host for TerminalHost {
 /// archive — and asking someone to mount a disc before they can run `detect`
 /// would be asking them to do the tool's job. A mounted disc still works, since a
 /// mount point is a folder.
+/// Whether this image's note has still to be printed, and mark it said.
+fn noted_image(image: &Path) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let said = SAID.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let absolute = fs::canonicalize(image).unwrap_or_else(|_| image.to_path_buf());
+    match said.lock() {
+        Ok(mut said) => said.insert(absolute),
+        // A poisoned lock means another thread panicked while holding it; the
+        // note is worth printing again rather than swallowing.
+        Err(_) => true,
+    }
+}
+
 fn open_game(dir: &str) -> Result<Vfs> {
     let root = PathBuf::from(dir);
     if root.is_dir() {
-        return Vfs::from_directory(&root);
+        let mut vfs = Vfs::from_directory(&root)?;
+
+        // A folder that holds a disc image beside its own files is how a game
+        // shipped on a disc is repaired: the repaired script goes in the
+        // folder and shadows the copy inside the image, because the folder is
+        // searched first. That shadowing is the whole reason this works, so it
+        // is asserted rather than assumed — the image goes *under* the folder,
+        // never over it.
+        let mut images: Vec<PathBuf> = fs::read_dir(&root)
+            .map_err(|e| Error::Io(format!("reading {}: {e}", root.display())))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
+            })
+            .collect();
+        images.sort();
+        match images.len() {
+            0 => {}
+            1 => {
+                let image = &images[0];
+                // Said once per image: a command opens the same game several
+                // times over (once to read it, once to write into a copy, once
+                // to read the copy back), and a note repeated four times is a
+                // note nobody reads.
+                if noted_image(image) {
+                    println!(
+                        "{}",
+                        dim(format!(
+                            "reading the disc image beside these files: {} (a file in this folder \
+                             shadows the image's own copy of it)",
+                            image.display()
+                        ))
+                    );
+                }
+                vfs.push(Arc::new(kintsugi_core::iso::IsoSource::open(image)?));
+            }
+            several => {
+                return Err(Error::unsupported(
+                    "a folder holding several disc images",
+                    format!(
+                        "'{}' holds {several} disc images ({}); point at the one to read, because \
+                         a folder of several games is nobody's game",
+                        root.display(),
+                        images
+                            .iter()
+                            .map(|image| format!(
+                                "'{}'",
+                                image.file_name().unwrap_or_default().to_string_lossy()
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+        return Ok(vfs);
     }
     let extension = root
         .extension()

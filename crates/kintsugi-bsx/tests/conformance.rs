@@ -26,17 +26,49 @@ fn a_bsx_release() -> SeamFixture {
     .file("exe/bsx.ini", config)
     .file("exe/graphics.bsa", archive)
     .file("exe/title.bsg", loose)
-    // The story file is here because detection reads its magic, and because a
-    // release without one is not this engine's game. It is deliberately *not*
-    // declared with `.script(...)`: this seam cannot read BSScript into the
-    // body's IR yet, and a fixture that declared one would be asking for a
-    // promise the seam does not make.
+    // The story file: one line per command, in the story's own order, so the
+    // ids a translation carries are the indices the engine indexes the table
+    // by and a repair lands on the line it names.
     .file("exe/bsx.dat", make_bsx_dat())
+    .script("exe/bsx.dat")
+}
+
+/// The story alone, with no archive in sight.
+///
+/// This engine plays a game out of a compiled story; its archives are where the
+/// pictures live. A seam that could only mount a game with an archive in it
+/// would refuse the release that shipped its assets loose.
+fn a_story_without_an_archive() -> SeamFixture {
+    SeamFixture::new(
+        "a BSX release whose story is the only file this seam knows",
+        Confidence::Likely,
+    )
+    .file("exe/bsx.dat", make_bsx_dat())
+    .script("exe/bsx.dat")
 }
 
 #[test]
 fn the_bsx_seam_keeps_the_seam_contract() {
-    assert_seam_contract(&kintsugi_bsx::plugin(), &[a_bsx_release()]);
+    assert_seam_contract(
+        &kintsugi_bsx::plugin(),
+        &[a_bsx_release(), a_story_without_an_archive()],
+    );
+}
+
+#[test]
+fn a_story_that_is_not_a_story_is_never_called_one() {
+    // The magic alone is not evidence enough to hand a game's script over: a
+    // file that starts with `BSScript` and whose table of lines does not parse
+    // is skipped, named in a mount note, and never named as the main script.
+    let mut broken = make_bsx_dat();
+    let story = kintsugi_bsx::Story::parse(&broken).expect("the fixture is a story");
+    broken.truncate(story.bytes().len() - 8);
+    let fixture = SeamFixture::new(
+        "a folder whose only BSScript file cannot be read",
+        Confidence::Likely,
+    )
+    .file("exe/bsx.dat", broken);
+    assert_seam_contract(&kintsugi_bsx::plugin(), &[fixture]);
 }
 
 #[test]

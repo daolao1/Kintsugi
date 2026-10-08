@@ -36,8 +36,8 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | --- | --- |
 | **Body** — engine-agnostic asset/script IR, VFS, runtime, detection registry, zero dependencies | working |
 | **Seam №1 — BlueGale (ブルーゲイル)**: SNN+INX archives, ZBM/BBM bitmaps, BDT scripts | working |
-| **Seam №2 — BlueGale BSX (the 2008 engine)**: BSArc archives (4,377 files read out of a 937 MB disc image), BSG pictures (RLE, indexed and true colour), mountable straight from an `.iso` | working — its compiled `BSScript` story is documented and *not* read yet ([research notes](docs/RESEARCH-BSX.md)) |
-| **Disc images**: point a command at a game folder, an `.iso`, or the `.mds` beside one | working |
+| **Seam №2 — BlueGale BSX (the 2008 engine)**: BSArc archives (4,377 files read out of a 937 MB disc image), BSG pictures (RLE, indexed and true colour), and its compiled `BSScript` story — **read, translated and repaired**: 11,864 lines out of a 2008 release, bytecode untouched ([research notes](docs/RESEARCH-BSX.md)) | working |
+| **Disc images**: point a command at a game folder, an `.iso`, or the `.mds` beside one — and a folder holding an image is a game too, with its own files shadowing the image's (which is how a repaired script is installed over a disc) | working |
 | **Glaze — HD upscaling**: `nearest`, `bilinear`, `bicubic`, `lanczos3`, `anime4k` (Anime4K-style preset) | working |
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
@@ -49,7 +49,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Seam contract**: `kintsugi-testkit` — every engine runs the same checks (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, tested against eight deliberately broken seams, and run by **two** unrelated engine families |
 | **Seam №3…N** — other engines | the reason the body exists; [adding one](docs/ADDING-AN-ENGINE.md) is a crate and two registration lines |
 | BlueGale **AMV** video | *not implemented* — an honest hole, see [research notes](docs/RESEARCH-BlueGale.md) |
-| BlueGale BSX **`BSScript`** story, and **LZ**-compressed BSG pictures | *not implemented* — refused by name, layouts documented in [docs/RESEARCH-BSX.md](docs/RESEARCH-BSX.md) |
+| BlueGale BSX **LZ**-compressed BSG pictures, and the `BSScript` bytecode (which line belongs to which scene) | *not implemented* — refused by name, layouts documented in [docs/RESEARCH-BSX.md](docs/RESEARCH-BSX.md) |
 
 ---
 

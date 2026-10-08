@@ -1,15 +1,18 @@
 //! The BSX seam: detection, mounting and asset decoding.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kintsugi_core::asset::{Audio, Image};
 use kintsugi_core::detect::{Confidence, Detection};
 use kintsugi_core::error::{Error, Result};
-use kintsugi_core::plugin::{EngineMount, EnginePlugin, MountInfo, PluginMetadata};
+use kintsugi_core::plugin::{EngineMount, EnginePlugin, MountInfo, PluginMetadata, WrittenScript};
+use kintsugi_core::script::{Command, Script};
 use kintsugi_core::vfs::{Vfs, VirtualPath};
 
 use crate::bsarc::BsarcArchive;
 use crate::image;
+use crate::script::{SCRIPT_MAGIC, Story};
 
 /// Registry id of this seam.
 ///
@@ -18,10 +21,6 @@ use crate::image;
 /// "BSX" is therefore what the engine calls itself, which is the name a repair
 /// should carry.
 pub const ENGINE_ID: &str = "bsx";
-
-/// The script format's magic, used as evidence of the engine rather than of a
-/// file name.
-pub const SCRIPT_MAGIC: &[u8] = b"BSScript";
 
 static METADATA: PluginMetadata = PluginMetadata {
     id: ENGINE_ID,
@@ -66,20 +65,32 @@ impl EnginePlugin for BsxPlugin {
 
         // The engine's own script format: the strongest statement a folder can
         // make about which system it belongs to, because the format is not
-        // shared with anyone.
+        // shared with anyone. The magic is the evidence here, not the file
+        // name — a `.dat` proves nothing and a story named something else is
+        // still a story — so every file's first bytes are read.
         let mut scripts = Vec::new();
+        let mut lines = 0usize;
         for (path, size) in vfs.list() {
             if size < SCRIPT_MAGIC.len() as u64 {
                 continue;
             }
-            if path.extension() != Some("dat") {
+            let Ok(head) = vfs.read_range(&path, 0, SCRIPT_MAGIC.len()) else {
+                continue;
+            };
+            if head != SCRIPT_MAGIC {
                 continue;
             }
-            if let Ok(head) = vfs.read_range(&path, 0, SCRIPT_MAGIC.len()) {
-                if head == SCRIPT_MAGIC {
+            // Readable is not the same as understood: only a file whose table
+            // of lines parses counts as a story, and only then does this seam
+            // say it knows which file a game is played through.
+            if let Ok(bytes) = vfs.read(&path) {
+                if let Ok(story) = Story::parse(&bytes) {
+                    lines += story.strings().len();
                     scripts.push(path);
+                    continue;
                 }
             }
+            scripts.push(path);
         }
 
         // Loose pictures: real evidence of the image format, weaker evidence of
@@ -98,12 +109,17 @@ impl EnginePlugin for BsxPlugin {
 
         let mut verdicts = Vec::new();
         if archives > 0 && !scripts.is_empty() {
+            let story = if lines > 0 {
+                format!("holding {lines} line(s) of story")
+            } else {
+                String::from("whose stories this seam cannot read")
+            };
             verdicts.push(Detection::new(
                 ENGINE_ID,
                 Confidence::Certain,
                 format!(
                     "{} BSArc archive(s) with valid indexes ({archive_entries} entries) and {} \
-                     BSScript file(s)",
+                     BSScript file(s) {story}",
                     archives,
                     scripts.len()
                 ),
@@ -193,16 +209,75 @@ impl EnginePlugin for BsxPlugin {
             mounted.push(source.clone());
         }
 
-        if count == 0 {
+        // The story the game is played through, found by its own magic rather
+        // than by a file name, and only counted once it parses: `kintsugi
+        // translate` must not be handed a `.dat` that this seam cannot read.
+        let mut stories = Vec::new();
+        let mut stories_seen = 0usize;
+        for (path, size) in mounted.list() {
+            if size < SCRIPT_MAGIC.len() as u64 {
+                continue;
+            }
+            let Ok(head) = mounted.read_range(&path, 0, SCRIPT_MAGIC.len()) else {
+                continue;
+            };
+            if head != SCRIPT_MAGIC {
+                continue;
+            }
+            stories_seen += 1;
+            match mounted
+                .read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    Story::parse(&bytes)
+                        .map(|story| story.strings().len())
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(strings) => {
+                    info.note(format!("story '{path}': {strings} line(s)"));
+                    stories.push(path);
+                }
+                Err(why) => info.note(format!(
+                    "'{path}' carries the BSScript magic and is not a story this seam can read, so \
+                     it is mounted as a file and never handed over as a script: {why}"
+                )),
+            }
+        }
+
+        // A game of this engine may be archives, or loose files, or both: the
+        // release this seam was written for keeps its story and its title
+        // picture loose beside six archives. So the mount succeeds on any of
+        // this engine's evidence and refuses a folder with none of it — an
+        // empty folder is nobody's game, and neither is one that merely has
+        // files in it.
+        let loose_images = mounted
+            .list()
+            .into_iter()
+            .filter(|(path, size)| {
+                path.extension() == Some("bsg")
+                    && *size >= image::GRAPHICS_MAGIC.len() as u64
+                    && mounted
+                        .read_range(path, 0, image::GRAPHICS_MAGIC.len())
+                        .is_ok_and(|head| {
+                            head == image::GRAPHICS_MAGIC || head == image::COMPOSITION_MAGIC
+                        })
+            })
+            .count();
+        if count == 0 && stories_seen == 0 && loose_images == 0 {
             return Err(Error::unsupported(
                 "BSX",
-                "no BSArc archives found, and this seam mounts its games through their archives",
+                "no BSArc archive, no BSScript file and no loose BSG picture found, and this seam \
+                 mounts a game through what its engine left in it",
             ));
         }
         info.note(format!(
             "{count} archive(s), {entries} file(s) visible in total"
         ));
-        Ok(Box::new(BsxMount { info, vfs: mounted }))
+        Ok(Box::new(BsxMount {
+            info,
+            vfs: mounted,
+            stories,
+        }))
     }
 }
 
@@ -244,6 +319,9 @@ where
 pub struct BsxMount {
     info: MountInfo,
     vfs: Vfs,
+    /// Every file that begins with the story magic **and** parses as a story,
+    /// in the order the sources present them.
+    stories: Vec<VirtualPath>,
 }
 
 impl EngineMount for BsxMount {
@@ -287,5 +365,83 @@ impl EngineMount for BsxMount {
 
     fn image_extensions(&self) -> &'static [&'static str] {
         &["bsg", "bmp"]
+    }
+
+    fn read_script(&self, path: &VirtualPath) -> Result<Script> {
+        let bytes = self.vfs.read(path)?;
+        let story = Story::parse(&bytes).map_err(|refused| Error::Script {
+            context: path.to_string(),
+            detail: refused.to_string(),
+        })?;
+
+        // One line per command, in the story's own order: the ids a translation
+        // carries are the indices this table is indexed by, which is what makes
+        // a repair able to land on the line it names.
+        let mut script = Script::new(path.clone());
+        script.warnings.push(format!(
+            "{} line(s) of story handed over as raw lines: BSScript keeps its prose in one flat \
+             table, and which line a given scene shows is decided by bytecode this seam does not \
+             read yet, so a line's neighbours here are its neighbours in the file, not in the \
+             scene",
+            story.strings().len()
+        ));
+        for line in story.strings() {
+            script.commands.push(Command::RawLine(line.clone()));
+        }
+        Ok(script)
+    }
+
+    fn primary_script(&self) -> Result<VirtualPath> {
+        // The magic is the evidence, so a folder with one readable story names
+        // it without a guess. Two of them is a question for the person holding
+        // the game: this seam will not play one and repair the other.
+        match self.stories.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => Err(Error::unsupported(
+                "BSX",
+                "no BSScript story parses in this game, so this seam cannot name a main script",
+            )),
+            several => Err(Error::unsupported(
+                "BSX",
+                format!(
+                    "{} BSScript stories parse in this game ({}); name the one to read or repair \
+                     with --script, because this seam will not choose between them",
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|path| format!("'{path}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
+    }
+
+    fn write_script(
+        &self,
+        path: &VirtualPath,
+        replacements: &BTreeMap<usize, String>,
+    ) -> Result<WrittenScript> {
+        let bytes = self.vfs.read(path)?;
+        let story = Story::parse(&bytes).map_err(|refused| Error::Script {
+            context: path.to_string(),
+            detail: refused.to_string(),
+        })?;
+        let repair = story
+            .rebuild(replacements)
+            .map_err(|refused| Error::Script {
+                context: format!("'{path}'"),
+                detail: refused.to_string(),
+            })?;
+
+        // A story is a file of its own here, so the repair is one file: the
+        // index rewritten in place and the text block after it, with every
+        // other byte of the game's script untouched.
+        Ok(WrittenScript::loose(
+            path.clone(),
+            repair.bytes,
+            repair.replaced,
+            repair.unmatched,
+        ))
     }
 }

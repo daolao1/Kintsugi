@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use kintsugi_core::error::{Error, Result};
 
 use crate::image::{COMPOSITION_MAGIC, GRAPHICS_MAGIC};
+use crate::script::DIRECTORY_START;
 
 /// Marks a folder this module made, so a demo can be rewritten but never
 /// written over somebody's game. The same file name the other seam's demo
@@ -180,17 +181,88 @@ pub fn make_bsarc(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// A `bsx.dat` header: the magic, the version, and nothing else.
+/// A `bsx.dat` holding a story of `lines`, in the shape the real release has.
 ///
-/// Detection reads the magic and refuses to guess past it, so this is exactly
-/// as much of a story file as a detection fixture needs. The real layout — a
-/// table of addresses and lengths, then a heap of CP932 text — is documented in
-/// `docs/RESEARCH-BSX.md` and is not what this builder claims to produce.
-pub fn make_bsx_dat() -> Vec<u8> {
+/// Eight records, described by the pairs at `0x2C` exactly as the release
+/// describes its own thirteen: an index of block-relative offsets immediately
+/// followed by the block of NUL-terminated CP932 text, twice for the two
+/// variable-name lists, once for the cast list, and once for the story.
+///
+/// Pass at least four lines. A table smaller than the ones beside it is
+/// indistinguishable from a name list, and the reader refuses a file with two
+/// equally likely stories rather than picking one — so a short story here would
+/// test the refusal, not the reader.
+pub fn make_story(lines: &[&str]) -> Vec<u8> {
+    let names: [&[&str]; 3] = [
+        &["@harem", "@harem_flag"],
+        &["#bgm", "#day", "#time"],
+        &["孝三", "？？？", "真理奈"],
+    ];
+    let mut tables: Vec<&[&str]> = names.to_vec();
+    tables.push(lines);
+
+    // The magic, then the seven numbers the release carries at 0x10 and this
+    // seam does not read: they land the record list on 0x2C, which is the one
+    // thing about them this file depends on.
     let mut out = crate::SCRIPT_MAGIC.to_vec();
     out.extend_from_slice(b" Rev.6\0\0");
-    out.extend_from_slice(&[0u8; 0x100 - 16]);
+    for number in [0x100u32, 2, 0x18, 4, 0xc, 0xe, 0x110] {
+        out.extend_from_slice(&number.to_le_bytes());
+    }
+    debug_assert_eq!(out.len(), DIRECTORY_START);
+
+    // The directory describes records that do not exist yet, so it is reserved
+    // first and filled in after the tables have been laid out.
+    let directory = out.len();
+    out.resize(directory + tables.len() * 2 * 8, 0);
+
+    let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for table in &tables {
+        let mut index = Vec::new();
+        let mut block = Vec::new();
+        for line in table.iter() {
+            index.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            // A fixture's own text is encodable by construction; an empty line
+            // keeps the count right if one ever is not, and the reader then
+            // sees an empty string rather than a shifted table.
+            let encoded = crate::encode_cp932(line).unwrap_or_default();
+            block.extend_from_slice(&encoded);
+            block.push(0);
+        }
+        let index_at = out.len();
+        out.extend_from_slice(&index);
+        let block_at = out.len();
+        out.extend_from_slice(&block);
+        // Eight-byte aligned, the way the release pads between its records.
+        while out.len() % 8 != 0 {
+            out.push(0);
+        }
+        placed.push((index_at, index.len(), block_at, block.len()));
+    }
+
+    for (record, (index_at, index_len, block_at, block_len)) in placed.into_iter().enumerate() {
+        for (slot, (offset, size)) in [(index_at, index_len), (block_at, block_len)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = directory + (record * 2 + slot) * 8;
+            out[at..at + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+            out[at + 4..at + 8].copy_from_slice(&(size as u32).to_le_bytes());
+        }
+    }
     out
+}
+
+/// A `bsx.dat` with a story in it, for the tests and the demo game.
+pub fn make_bsx_dat() -> Vec<u8> {
+    make_story(&[
+        "■■■　真理奈ＥＮＤ　■■■",
+        "どこからか、笑い声が聞こえてくる。",
+        "何だよその差は！？　つーか、それ朝の挨拶か？",
+        "縮れ毛をしゃぶり、汗で蒸れた柔肉に思いを馳せつつ",
+        "真理奈と愛莉の両",
+        "見に行かない",
+    ])
 }
 
 /// Write a tiny, complete, BSX-shaped game into `dir`, and list what was written.
@@ -301,11 +373,11 @@ fn demo_config() -> Vec<u8> {
 /// names the system, one archive holding one picture, and a loose picture
 /// beside it.
 ///
-/// The story file is deliberately absent: this seam does not read BSScript
-/// yet, so a fixture that carried one would either have to be ignored — which
-/// would make the test weaker than it looks — or would fail. When the script
-/// reader lands, this builder grows a script and the conformance test grows a
-/// `.script(...)` line with it.
+/// The compiled story is not part of what this returns: a caller that wants a
+/// script wants to say which lines are in it, and `make_story` builds exactly
+/// that. `a_bsx_release` in `tests/conformance.rs` puts the two together — and
+/// declares the script, so a seam that stopped reading it would fail there
+/// rather than pass quietly here.
 pub fn demo_release() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let picture = make_bsg(
         2,

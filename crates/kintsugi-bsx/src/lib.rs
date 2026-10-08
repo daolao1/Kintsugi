@@ -12,8 +12,11 @@
 //!   container — BlueGale and Bishop shipped the same middleware.
 //! * `BSG` against all 765 images of that release and against GARbro's
 //!   `ArcFormats/Bishop/ImageBSG.cs`.
-//! * The BSScript file (`bsx.dat`) against the file itself: `BSScript Rev.6`,
-//!   a table of addresses and lengths, and a heap of CP932 text.
+//! * The `BSScript` story (`bsx.dat`) against the file itself and against a
+//!   parser written independently of this crate: its thirteen records, its four
+//!   string tables, and the measurement that says the engine refers to its
+//!   lines by index rather than by address — which is what makes a repair that
+//!   changes line lengths possible at all.
 //!
 //! `docs/RESEARCH-BSX.md` records the numbers, the sources and — just as
 //! importantly — what is **not** implemented.
@@ -21,19 +24,26 @@
 //! # What this seam does today
 //!
 //! Detection, mounting (loose files plus every archive, read through byte
-//! ranges), and image decoding. The story format is documented and read but
-//! not yet turned into the body's IR, so this seam does not claim to know
-//! which file the game's script is: `kintsugi inspect` will list a `bsx.dat`
-//! as a file, and `kintsugi translate` will say the seam cannot read it. That
-//! gap is deliberate — a seam that guessed at a compiled script would put
-//! plausible words into a game without knowing what they replace.
+//! ranges), image decoding, and the story: `bsx.dat` is read into the body's IR
+//! one line per command, translated, and written back with only the lines a
+//! translation names changed. Verified on a real 2008 release: 11,864 lines,
+//! extracted, mock-translated and repaired in 0.55 s, with the bytecode and the
+//! name tables byte-identical afterwards.
+//!
+//! What it does **not** do is say which line is dialogue and which is a menu
+//! label: that is decided by the compiled bytecode, which this seam does not
+//! read yet, so every line arrives as [`kintsugi_core::script::Command::RawLine`]
+//! with a warning that says so. A seam that guessed would put plausible words
+//! into a game without knowing what they replace.
 
 pub mod bsarc;
 pub mod fixtures;
 pub mod image;
 pub mod plugin;
+pub mod script;
 
-pub use plugin::{ENGINE_ID, SCRIPT_MAGIC, plugin};
+pub use plugin::{ENGINE_ID, plugin};
+pub use script::{SCRIPT_MAGIC, Story};
 
 use kintsugi_core::error::{Error, Result};
 

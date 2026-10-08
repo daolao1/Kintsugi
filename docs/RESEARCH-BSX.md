@@ -157,29 +157,64 @@ name in the message.
 
 ## `BSScript` — the story
 
-`bsx.dat` begins with the ASCII magic `BSScript Rev.6`, is 1,062,484 bytes, and
-about a third of it is CP932 text. The parts that are established:
+`bsx.dat` is 1,062,484 bytes of `BSScript Rev.6`. The seam **reads, translates
+and repairs it**; what follows is what is established, and how.
 
-* Header: magic (16 bytes), then little-endian u32s `0x100`, `2`, `0x18`, `4`,
-  `0xc`, `0xe`, `0x110`.
-* From `0x30` on, a table of `(offset, size)` pairs. The last few pairs point
-  into the text heap that starts around `0x52990`, and the first text runs
-  appear at `0x52a78`. The early pairs overlap each other, so the table is
-  hierarchical — regions containing records — rather than a flat list.
-* Text is CP932, and `scene.dat` beside it is plain CP932 CSV naming assets
-  (`0,0,marina_replay_01`), which is how the format's asset names were confirmed
-  without reading any story text.
+* Magic (16 bytes: `BSScript Rev.6`), then seven little-endian u32s at
+  `0x10..0x2C` — `0x100`, `2`, `0x18`, `4`, `0xc`, `0xe`, `0x110`. Their meaning
+  is **not** established. They are why the record list starts at `0x2C`, and
+  nothing else is claimed for them.
+* At `0x2C`, `(offset, size)` pairs: **thirteen** of them. The fourteenth is
+  `(0x01030000, 1)`, and every pair after it points past the end of the file —
+  which is what says the list has ended. The reader uses that rule (the first
+  pair that is not a record inside the file) rather than a count from a header
+  field it cannot explain.
+* The list is **not** a partition: record 0 spans `0x4534e` + 11,864, ending at
+  `0x481a6`, and records 1 (`0x45460`+1,688) and 2 (`0x45b00`+2,006) lie inside
+  that span. Record 3 (`0x462e0`+15,528) starts inside it and ends after it.
+* Four of the thirteen records are **string tables**: a `u32` index of
+  block-relative offsets immediately followed by a block of NUL-terminated CP932
+  text, one line per entry. In this file they hold 4 `@` variables, 12 `#`
+  variables, 20 cast names, and the story: `(0x52ad0, 47,456)` for the index and
+  `(0x5e430, 676,388)` for the block, 11,864 lines.
+* The story is the **last** record *and* larger than every other string table.
+  Both are required and a file that satisfies only one is refused: with a
+  damaged story block, a reader that took the largest table would quietly decide
+  the cast list was the story and rewrite a game's names into a translation.
+  With the story unreadable, no candidate satisfies both, and the seam says so.
+* The index is exact rather than a sample: for every entry `k`, the byte before
+  `offsets[k]` is a NUL and no other byte of the line before it is, `offsets[0]`
+  is 0, and the last line's terminator is the block's last byte. All 11,864
+  lines satisfy that, and no line contains a control byte (checked: zero of
+  11,864).
+* **The engine refers to its lines by index, never by address.** Measured on
+  this release: of 200 sampled lines (indices 2,000–11,863), all 200 are named
+  by index somewhere between `0x100` and the text block — 785 references — while
+  only four have any value in that region that could be read as a block offset,
+  and 7 hits across 386 KB of data is fewer than chance produces. That is what
+  makes a repair which changes line lengths possible at all: the index is
+  rewritten in place at the same size (11,864 × 4), the block — the last thing
+  in the file — grows or shrinks, and the single directory pair that measures it
+  is corrected.
+* A repair, byte for byte, for a mock translation of all 11,864 lines: the
+  header and the first twelve directory pairs identical; the story's offset
+  unchanged (`0x5e430`) and its size corrected from 676,388 to 747,572; the
+  bytecode and the name tables from `0x94` to `0x52ad0` identical; 11,863 index
+  entries moved and still strictly increasing; the file growing by exactly
+  71,184 bytes — 11,864 × 6, the length the prefix added. Verified by re-reading
+  the repaired file with a parser written independently of the seam and
+  comparing every line against the original.
 
-**Not implemented:** reading the story into the body's IR. The string extents
-are visible, but which strings are dialogue, which are menu labels and which are
-file names is decided by the compiled code section, and a translation that
-guessed would put words into a game without knowing what they replace. So the
-seam does **not** implement `primary_script` either: naming `bsx.dat` as the
-game's script while being unable to read it would make `translate` and `install`
-aim at a file they cannot follow through on. `kintsugi inspect` lists the file;
-`kintsugi translate` says the seam cannot read it. When the reader lands, the
-script fixture and the `.script(...)` line in
-`crates/kintsugi-bsx/tests/conformance.rs` land with it.
+**Not implemented:** the bytecode, and the records that are not string tables —
+`0x4534e`+11,864, `0x45460`+1,688, `0x45b00`+2,006, `0x462e0`+15,528,
+`0x49f90`+35,204. The first of those holds u32 string indices in some order
+(11,860–11,863 appear together near its start, which is where the story's
+`見に行く` / `見に行かない` choice lives), so it is very likely the table saying
+which line belongs to which scene — exactly the classification (`Narration`,
+`Dialogue`, `Choice`) the body's IR would want, and exactly what this seam does
+not claim. Every line is therefore handed over as `Command::RawLine` with a
+warning that says so, and `translate` extracts raw lines by default
+(`--only-typed` skips them) precisely for seams in this state.
 
 ## Audio
 
