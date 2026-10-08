@@ -210,3 +210,165 @@ fn a_patch_written_beside_the_folder_leaves_every_original_byte_alone() {
         "the patch should contain the translated text"
     );
 }
+
+/// The exit-code table in `docs/PLATFORMS.md` is a contract with scripts, and
+/// nothing was testing it. `--faktur 4` used to print the usage text and exit
+/// **0**: a typo reported success to whatever was watching the exit status, so
+/// a CI job or a batch script would carry on as if a repair had been made.
+#[test]
+fn a_mistyped_command_is_a_usage_error_and_not_a_success() {
+    let output = run(&["--faktur", "4"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("unknown command '--faktur'"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    // The usage text goes to stderr with the error, where a failure's
+    // explanation belongs; stdout stays clean for anyone piping it.
+    assert!(
+        stderr(&output).contains("Usage:"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+}
+
+/// Helping is not failing: asking for help, with or without words, is exit 0.
+#[test]
+fn asking_for_help_is_not_an_error() {
+    for args in [vec![], vec!["help"], vec!["--help"], vec!["-h"]] {
+        let output = run(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "`kintsugi {}` should be help, not a failure; stderr: {}",
+            args.join(" "),
+            stderr(&output)
+        );
+        assert!(
+            stdout(&output).contains("Usage:"),
+            "`kintsugi {}` should print the usage text on stdout",
+            args.join(" ")
+        );
+    }
+}
+
+/// A missing argument is a command line that was never finished, so it is exit
+/// 2 — not exit 1, which would blame the game for the user's typo.
+#[test]
+fn a_missing_argument_is_a_usage_error() {
+    for command in [
+        "detect",
+        "inspect",
+        "play",
+        "upscale",
+        "interpolate",
+        "translate",
+    ] {
+        let output = run(&[command]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`kintsugi {command}` with no directory should be a usage error; stderr: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("missing game directory"),
+            "stderr: {}",
+            stderr(&output)
+        );
+    }
+}
+
+/// Flag *values* are the same story, and the two commands have honestly
+/// different bounds: the glazer's factor is bounded, the interpolator's is not.
+#[test]
+fn a_bad_flag_value_is_a_usage_error_with_the_right_bound() {
+    let temp = TempDir::new("bad-flags");
+    let game = temp.0.join("game");
+    kintsugi_bluegale::fixtures::write_demo_game(&game).unwrap();
+    let dir = game.to_str().unwrap();
+
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &["upscale", dir, "--factor", "abc"],
+            "--factor must be a whole number",
+        ),
+        (
+            &["upscale", dir, "--factor", "0"],
+            "--factor must be between 1 and 16",
+        ),
+        (&["upscale", dir, "--method", "wat"], "unknown method 'wat'"),
+        (
+            &["interpolate", dir, "--factor", "0"],
+            "--factor must be at least 1",
+        ),
+        (
+            &["upscale", dir, "--faktur", "4"],
+            "unknown flag '--faktur'",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = run(args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`kintsugi {}` should be a usage error; stderr: {}",
+            args.join(" "),
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(expected),
+            "`kintsugi {}` should say {expected:?}; stderr: {}",
+            args.join(" "),
+            stderr(&output)
+        );
+    }
+}
+
+/// ...but a factor the interpolator genuinely cannot honour is an engine
+/// refusal (exit 1) that names the input, not a complaint about the command
+/// line: four frames at `--factor 400` is real work (1201 frames), and the
+/// budget refuses what no machine could hold without pretending the user
+/// mistyped.
+#[test]
+fn an_impossible_frame_count_is_refused_by_the_engine_not_the_parser() {
+    let temp = TempDir::new("frame-budget");
+    let game = temp.0.join("game");
+    kintsugi_bluegale::fixtures::write_demo_game(&game).unwrap();
+
+    let output = run(&[
+        "interpolate",
+        game.to_str().unwrap(),
+        "--factor",
+        "4294967295",
+        "-o",
+        temp.0.join("frames").to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("100000-frame limit"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(
+        !temp.0.join("frames").exists(),
+        "a refused interpolation must not leave an output folder behind"
+    );
+}

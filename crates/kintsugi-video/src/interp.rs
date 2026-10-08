@@ -132,6 +132,18 @@ pub fn group_by_size(frames: &[NamedFrame]) -> (Vec<NamedFrame>, Vec<NotAFrame>)
     (sequence, skipped)
 }
 
+/// The most frames one interpolation may produce.
+///
+/// A bound is needed because the output count is `(n - 1) * factor + 1`, and
+/// "does this fit in a `usize`" is the wrong question on a 64-bit machine:
+/// `Vec::with_capacity(4_294_967_296)` *succeeds* there by reserving 171 GB of
+/// address space that it then walks into. The honest question is whether a
+/// timeline could ever want the frames. Four frames at `--factor 400` is 1201,
+/// which is real work; a hundred thousand is far past any cutscene and far
+/// below what would exhaust a machine, so the refusal lands on typos instead of
+/// on real work.
+pub const MAX_OUTPUT_FRAMES: usize = 100_000;
+
 /// Fill the timeline between consecutive `frames`.
 ///
 /// For `n` frames this returns `(n - 1) * factor + 1` frames: every gap
@@ -159,7 +171,27 @@ pub fn interpolate_sequence(
     if factor == 1 {
         return Ok(frames.to_vec());
     }
-    let mut out = Vec::with_capacity(frames.len() * factor as usize);
+    // The output count is `(n - 1) * factor + 1`, which a thoughtless factor
+    // can push past what a `usize` can address (and, well before that, past
+    // what any machine can hold). Compute it out loud and refuse the impossible
+    // ones: `--factor 4000000000` is a typo, and a typo should read as a
+    // diagnosis rather than as an abort.
+    let count = (frames.len() as u64 - 1)
+        .checked_mul(factor as u64)
+        .and_then(|n| n.checked_add(1))
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|&n| n <= MAX_OUTPUT_FRAMES)
+        .ok_or_else(|| {
+            Error::unsupported(
+                "frame interpolation",
+                format!(
+                    "factor {factor} over {} frame(s) is more than the \
+                     {MAX_OUTPUT_FRAMES}-frame limit",
+                    frames.len()
+                ),
+            )
+        })?;
+    let mut out = Vec::with_capacity(count);
     for (index, frame) in frames.iter().enumerate() {
         out.push(frame.clone());
         if index + 1 == frames.len() {
@@ -230,6 +262,40 @@ mod tests {
         assert_eq!(out[6].data[0], 180); // the third original
         assert_eq!(out[1].data[0], 30); // 1/3 of the first gap
         assert_eq!(out[2].data[0], 60); // 2/3 of the first gap
+    }
+
+    /// A factor no machine could honour is refused by name, not by abort.
+    ///
+    /// The first version of this guard only checked that the frame count fit
+    /// in a `usize` — which on a 64-bit machine is true for four billion
+    /// frames, so `Vec::with_capacity` reserved 171 GB and cheerfully started
+    /// filling it. The limit is now a frame budget, and this test would hang
+    /// rather than fail if that guard were removed.
+    #[test]
+    fn an_impossible_factor_is_refused_not_attempted() {
+        let frames = vec![solid(1, 1, 0), solid(1, 1, 255)];
+        let err = interpolate_sequence(&frames, u32::MAX, &BlendInterpolator)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("100000-frame limit"),
+            "expected the frame-count refusal, got: {err}"
+        );
+
+        // And the honest bound is not a small arbitrary one: 400 frames from
+        // four inputs is 1201 frames, which is a lot but not impossible.
+        let four = vec![
+            solid(1, 1, 0),
+            solid(1, 1, 90),
+            solid(1, 1, 180),
+            solid(1, 1, 255),
+        ];
+        assert_eq!(
+            interpolate_sequence(&four, 400, &BlendInterpolator)
+                .unwrap()
+                .len(),
+            1201
+        );
     }
 
     #[test]

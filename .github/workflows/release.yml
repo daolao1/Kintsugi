@@ -264,7 +264,12 @@ jobs:
           body: |
             🏺 Repairing old games with gold. 以金缮之艺，续老游戏之命。
 
-            Every platform here is built from this commit and smoke-tested by
-            running `kintsugi demo` on it. The Android APK is a debug build
-            (signed with the Android debug key): it installs and runs, and
-            release signing is a documented next step, not a hidden one.
+            Every artifact here is built from this commit. The macOS, Windows,
+            and Linux archives are smoke-tested by *running* `kintsugi demo` on
+            them. The Android APK cannot be run on a CI runner, so that job
+            unpacks it and proves all four ABI slices (arm64-v8a,
+            armeabi-v7a, x86_64, x86) are inside instead — it is a **debug**
+            build, signed with the Android debug key, and release signing is a
+            documented next step rather than a hidden one. Whether the APK
+            renders correctly on a physical device is not something this
+            project has verified, and it will not claim otherwise.

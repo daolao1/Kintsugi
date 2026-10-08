@@ -78,9 +78,22 @@ fn run(args: &[String]) -> std::result::Result<(), Failure> {
             println!("kintsugi {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => {
+        // No arguments at all, `help`, `--help`, and `-h` are requests for
+        // help, and help is not a failure. Anything else here is a command
+        // that does not exist, and exiting 0 would tell a script that its
+        // repair was done when nothing ran at all — so a typo is a usage
+        // error, and the usage text goes to stderr where a failure's
+        // explanation belongs.
+        None | Some("help") | Some("--help") | Some("-h") => {
             print_usage();
             Ok(())
+        }
+        Some(other) => {
+            eprint!("{}", usage_text());
+            Err(Failure::Usage(format!(
+                "unknown command '{other}'; the commands are demo, detect, inspect, \
+                 play, upscale, interpolate, translate, version"
+            )))
         }
     }
 }
@@ -176,7 +189,7 @@ impl Args {
                 out.bools.insert(name.to_string());
                 i += 1;
             } else {
-                return Err(format!("unknown flag --{name} (try: kintsugi --help)"));
+                return Err(format!("unknown flag '--{name}' (try: kintsugi --help)"));
             }
         }
         Ok(out)
@@ -198,11 +211,45 @@ impl Args {
         self.positional.get(index).map(String::as_str)
     }
 
-    fn require_position(&self, index: usize, what: &str) -> Result<&str> {
+    /// A required positional argument.
+    ///
+    /// Missing arguments are a *usage* error (exit 2), not an engine refusal
+    /// (exit 1): nothing was discovered about the game, because the command to
+    /// look at one was never finished. The exit-code table in
+    /// `docs/PLATFORMS.md` says so, and a script that treats the two alike
+    /// cannot tell "your command was wrong" from "your game file is broken".
+    fn require_position(&self, index: usize, what: &str) -> std::result::Result<&str, Failure> {
         self.position(index).ok_or_else(|| {
-            Error::unsupported("cli", format!("missing {what} (see `kintsugi` for usage)"))
+            Failure::Usage(format!("missing {what} (see `kintsugi --help` for usage)"))
         })
     }
+}
+
+/// A whole-number `--factor` within `1..=max`, refused as a *usage* error when
+/// it is not one.
+///
+/// Each command passes its own bound, because the two differ for real reasons.
+/// The glazer's is `kintsugi_video::upscale::MAX_FACTOR`, read from there
+/// rather than copied so one place still decides how far a picture may be blown
+/// up; the interpolator has no fixed bound of its own (four frames at
+/// `--factor 400` is a legitimate 1201 frames) and passes `u32::MAX`, leaving
+/// the frame budget to refuse the impossible ones by name. What the command
+/// line adds is the distinction the exit-code table promises: a user's mistake
+/// is a usage error (exit 2), a game fault is an engine refusal (exit 1).
+fn parse_factor(text: &str, max: u32) -> std::result::Result<u32, Failure> {
+    let factor: u32 = text
+        .parse()
+        .map_err(|_| Failure::Usage(format!("--factor must be a whole number, not '{text}'")))?;
+    if factor == 0 || factor > max {
+        // An unbounded command should not answer "between 1 and 4294967295":
+        // that is a number, not a bound.
+        return Err(Failure::Usage(if max == u32::MAX {
+            format!("--factor must be at least 1, not {factor}")
+        } else {
+            format!("--factor must be between 1 and {max}, not {factor}")
+        }));
+    }
+    Ok(factor)
 }
 
 // ---------------------------------------------------------------------------
@@ -540,11 +587,21 @@ fn cmd_upscale(args: &[String]) -> std::result::Result<(), Failure> {
     let args = Args::parse(args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
-    let method = UpscaleMethod::from_name(&args.flag_or("method", "anime4k"))?;
-    let factor: u32 = args
-        .flag_or("factor", "2")
-        .parse()
-        .map_err(|_| Error::unsupported("cli", "factor must be an integer"))?;
+    // Both of these are the command line being wrong, not the game being
+    // broken: exit 2, like `--faktur 4`, so a script can tell them apart.
+    let method_name = args.flag_or("method", "anime4k");
+    let method = UpscaleMethod::from_name(&method_name).map_err(|_| {
+        Failure::Usage(format!(
+            "unknown method '{method_name}'; the methods are anime4k, lanczos3, \
+             bicubic, bilinear, nearest"
+        ))
+    })?;
+    // The glazer's bound comes from the glazer, so there is still one place
+    // that decides how far a picture may be blown up.
+    let factor = parse_factor(
+        &args.flag_or("factor", "2"),
+        kintsugi_video::upscale::MAX_FACTOR,
+    )?;
 
     let registry = registry();
     let (_, mount) = registry.mount_best(&vfs)?;
@@ -587,10 +644,11 @@ fn cmd_interpolate(args: &[String]) -> std::result::Result<(), Failure> {
     let args = Args::parse(args).map_err(Failure::Usage)?;
     let dir = args.require_position(0, "game directory")?;
     let vfs = open_game(dir)?;
-    let factor: u32 = args
-        .flag_or("factor", "2")
-        .parse()
-        .map_err(|_| Error::unsupported("cli", "factor must be an integer"))?;
+    // Only zero is wrong on its face here. The interpolator has no fixed
+    // bound — the frame budget inside the crate refuses the impossible ones by
+    // name, with the sequence length in the message, which this command line
+    // cannot know before mounting.
+    let factor = parse_factor(&args.flag_or("factor", "2"), u32::MAX)?;
 
     let registry = registry();
     let (_, mount) = registry.mount_best(&vfs)?;
@@ -968,61 +1026,143 @@ fn load_glossary(path: &Path) -> Result<Glossary> {
     Ok(glossary)
 }
 
-fn print_usage() {
-    println!(
-        "🏺 kintsugi {version} — 金缮引擎 · Repairing old games with gold.",
-        version = env!("CARGO_PKG_VERSION")
+/// The whole help text, in one place, so the same words reach a user who asked
+/// for help and a user who mistyped a command.
+fn usage_text() -> String {
+    let mut text = String::new();
+    let line = |text: &mut String, s: &str| {
+        text.push_str(s);
+        text.push('\n');
+    };
+    line(
+        &mut text,
+        &format!(
+            "🏺 kintsugi {version} — 金缮引擎 · Repairing old games with gold.",
+            version = env!("CARGO_PKG_VERSION")
+        ),
     );
-    println!();
-    println!("Usage:");
-    println!("  kintsugi demo [--dir DIR] [--no-play] [--auto]");
-    println!("        Synthesize a tiny BlueGale-style game, detect, play, and");
-    println!("        upscale its title screen (Anime4K-style preset).");
-    println!();
-    println!("  kintsugi detect <DIR>");
-    println!("        Ask every registered seam whose engine this is.");
-    println!();
-    println!("  kintsugi inspect <DIR> [--script PATH]");
-    println!("        Detection verdicts, mounted archives, files, script preview.");
-    println!();
-    println!("  kintsugi play <DIR> [--script PATH] [--auto]");
-    println!("        Mount the best-matching engine and play a script in the");
-    println!("        terminal. --auto answers choices with the first option.");
-    println!();
-    println!("  kintsugi upscale <DIR> [ASSET] [--method M] [--factor N] [-o PNG]");
-    println!("        Glaze an image asset: anime4k | lanczos3 | bicubic |");
-    println!("        bilinear | nearest. No ASSET lists candidates.");
-    println!();
-    println!(
+    line(&mut text, "");
+    line(&mut text, "Usage:");
+    line(
+        &mut text,
+        "  kintsugi demo [--dir DIR] [--no-play] [--auto]",
+    );
+    line(
+        &mut text,
+        "        Synthesize a tiny BlueGale-style game, detect, play, and",
+    );
+    line(
+        &mut text,
+        "        upscale its title screen (Anime4K-style preset).",
+    );
+    line(&mut text, "");
+    line(&mut text, "  kintsugi detect <DIR>");
+    line(
+        &mut text,
+        "        Ask every registered seam whose engine this is.",
+    );
+    line(&mut text, "");
+    line(&mut text, "  kintsugi inspect <DIR> [--script PATH]");
+    line(
+        &mut text,
+        "        Detection verdicts, mounted archives, files, script preview.",
+    );
+    line(&mut text, "");
+    line(&mut text, "  kintsugi play <DIR> [--script PATH] [--auto]");
+    line(
+        &mut text,
+        "        Mount the best-matching engine and play a script in the",
+    );
+    line(
+        &mut text,
+        "        terminal. --auto answers choices with the first option.",
+    );
+    line(&mut text, "");
+    line(
+        &mut text,
+        "  kintsugi upscale <DIR> [ASSET] [--method M] [--factor N] [-o PNG]",
+    );
+    line(
+        &mut text,
+        "        Glaze an image asset: anime4k | lanczos3 | bicubic |",
+    );
+    line(
+        &mut text,
+        "        bilinear | nearest. No ASSET lists candidates.",
+    );
+    line(&mut text, "");
+    line(
+        &mut text,
         "  kintsugi interpolate <DIR> [--factor N] [-o DIR]
         Fill the gaps between an image sequence's frames (插帧):
         blend | ... . Factor 2 turns N frames into 2N-1.
 
-  kintsugi translate <DIR> [options]"
+  kintsugi translate <DIR> [options]",
     );
-    println!("        Translate a script with an LLM (OpenAI-compatible API):");
-    println!("          --script PATH        script to translate (default: story.bdt)");
-    println!("          --source ja --target en");
-    println!("          --api-base URL       default https://api.openai.com/v1");
-    println!("          --api-key KEY        or KINTSUGI_API_KEY / OPENAI_API_KEY");
-    println!("          --model M            default gpt-4o-mini");
-    println!("          --glossary FILE      'source = target' lines, # comments");
-    println!("          --jsonl-dir DIR      also write source/translated JSONL");
-    println!("          --write-script PATH  write the repaired script outside <DIR>");
-    println!("          --only-typed         skip unclassified raw lines");
-    println!("          --mock               offline dry run, no network");
-    println!("                               (KINTSUGI_MOCK_MARKER sets its prefix)");
-    println!("          --no-play            don't play the result");
-    println!();
-    println!("  kintsugi version");
-    println!();
-    println!(
-        "{}",
-        dim(
+    line(
+        &mut text,
+        "        Translate a script with an LLM (OpenAI-compatible API):",
+    );
+    line(
+        &mut text,
+        "          --script PATH        script to translate (default: story.bdt)",
+    );
+    line(&mut text, "          --source ja --target en");
+    line(
+        &mut text,
+        "          --api-base URL       default https://api.openai.com/v1",
+    );
+    line(
+        &mut text,
+        "          --api-key KEY        or KINTSUGI_API_KEY / OPENAI_API_KEY",
+    );
+    line(
+        &mut text,
+        "          --model M            default gpt-4o-mini",
+    );
+    line(
+        &mut text,
+        "          --glossary FILE      'source = target' lines, # comments",
+    );
+    line(
+        &mut text,
+        "          --jsonl-dir DIR      also write source/translated JSONL",
+    );
+    line(
+        &mut text,
+        "          --write-script PATH  write the repaired script outside <DIR>",
+    );
+    line(
+        &mut text,
+        "          --only-typed         skip unclassified raw lines",
+    );
+    line(
+        &mut text,
+        "          --mock               offline dry run, no network",
+    );
+    line(
+        &mut text,
+        "                               (KINTSUGI_MOCK_MARKER sets its prefix)",
+    );
+    line(
+        &mut text,
+        "          --no-play            don't play the result",
+    );
+    line(&mut text, "");
+    line(&mut text, "  kintsugi version");
+    line(&mut text, "");
+    line(
+        &mut text,
+        &dim(
             "<DIR> is read-only: the game folder is never written to — not by
 --write-script, not by upscale -o, not by interpolate -o. Every
 artifact lands outside it, and installing a patch is your decision.
-The originals are never modified. All repairs stay visible. 以金缮之艺，续老游戏之命。"
-        )
+The originals are never modified. All repairs stay visible. 以金缮之艺，续老游戏之命。",
+        ),
     );
+    text
+}
+
+fn print_usage() {
+    print!("{}", usage_text());
 }

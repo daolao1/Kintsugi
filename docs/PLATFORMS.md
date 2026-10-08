@@ -107,12 +107,23 @@ Scriptable behaviour, so a repair can run inside make/CI:
 
 | code | meaning |
 | --- | --- |
-| `0` | the repair was done |
-| `1` | the engine refused (unreadable file, unmappable text, no such asset) |
-| `2` | the command line was wrong (unknown flag, missing value, or a request the tool refuses to carry out) |
+| `0` | the repair was done, or help was asked for (`kintsugi`, `help`, `--help`, `-h`) |
+| `1` | the engine refused (unreadable file, unmappable text, no such asset, a factor past what the input can bear) |
+| `2` | the command line was wrong (unknown command, unknown flag, missing directory, a flag value that is not what it claims, or a request the tool refuses to carry out) |
 
 Usage errors are separated from engine errors on purpose: `--faktur 4` should
-not look like a broken game file. One refusal sits in this class deliberately:
+not look like a broken game file. This was written down before it was true —
+`--faktur 4` printed the usage text and exited **0**, which told a script its
+repair had been made when nothing ran at all, and a missing directory exited
+`1`, blaming the game for a command that was never finished. The table is now
+tested through the binary, case by case, in `crates/kintsugi/tests/cli.rs`.
+
+The line between the two is whether the tool could have known before opening
+the game. `--factor 0` is wrong on its face (exit `2`); `--factor 400` on a
+four-frame sequence is 1201 frames of real work, and only the sequence length
+says whether that fits the frame budget, so its refusal is the engine's (exit
+`1`) and names the input. The glazer's bound is the exception that proves the
+rule: `1..=16` is fixed and known in advance, so `--factor 17` is exit `2`. One refusal sits in this class deliberately:
 writing anything inside the game folder exits `2`, because overwriting an
 original is a mistake in the *request*, not a fault in the game — and the files
 there are verified byte-identical afterwards (`ensure_outside_game` in
