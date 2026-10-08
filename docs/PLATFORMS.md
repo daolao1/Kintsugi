@@ -131,10 +131,13 @@ there are verified byte-identical afterwards (`ensure_outside_game` in
 
 `install` is the one command that writes a game-shaped thing, and it writes it
 where the user said: `--into COPY` is refused inside the game folder like every
-other output, refused when the folder already holds anything, and the copy is
-mounted and read back afterwards so "the repair landed" is a measurement. Its
-`--script FILE` is the patch (`translate --write-script` output), never a path
-inside the game.
+other output, and the copy is mounted and read back afterwards so "the repair
+landed" is a measurement. Its `--script FILE` is the patch (`translate
+--write-script` output), never a path inside the game. The destination has three
+allowed states and no fourth: empty, **verifiably Kintsugi's own previous
+install** (every file it recorded in `.kintsugi-install` present with the
+recorded size and checksum, and nothing else in the folder), or refused by name
+— a save game, a hand-edited script, or a folder that was never ours.
 
 The rule is about the folder rather than about one file, because "do not
 overwrite the script you read" still allows `--write-script game/game.snn`, an

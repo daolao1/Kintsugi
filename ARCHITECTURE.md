@@ -155,10 +155,11 @@ Seams take `&Vfs`, which is read-only by construction. No seam contains a write
 at all: `EngineMount::write_script` returns `WrittenScript` bytes and never
 touches a disk. Every write in the workspace is (a) a host writing a path the
 user named — `crates/kintsugi/src/main.rs` for `-o out.png`, `--write-script`,
-`--jsonl-dir`, and `crates/kintsugi-android/src/lib.rs` for the PNG the Android
-shell asks for — or (b) the glaze helper `kintsugi-translate::write_jsonl`,
-which the host calls with a path the user named. Nothing else in the tree opens
-a file for writing outside tests and the fixture generator.
+`--jsonl-dir`, the copy `install --into` builds, and
+`crates/kintsugi-android/src/lib.rs` for the PNG the Android shell asks for —
+or (b) the glaze helper `kintsugi-translate::write_jsonl`, which the host calls
+with a path the user named. Nothing else in the tree opens a file for writing
+outside tests and the fixture generator.
 
 Naming a path is not enough, though, so the host enforces the shape of it:
 **the game folder is read-only.** `ensure_outside_game` refuses `--write-script`,
@@ -166,9 +167,27 @@ Naming a path is not enough, though, so the host enforces the shape of it:
 which covers the file being read, any other original in there, and the glaze's
 own artifacts. `demo` is the one writer inside a folder it created, guarded by a
 `.kintsugi-demo` marker so it cannot plant fixtures over a real installation.
+`install --into` is the other one, and it is guarded the same way from the other
+side: it writes a `.kintsugi-install` manifest listing every file it wrote with
+its size and a checksum, and it will only write into a folder that is empty or
+that **verifies against that manifest** — same file set, same sizes, same
+checksums. A copy with a save game in it, or a copy whose script was hand-edited,
+is refused by name. So re-running the pipeline after fixing a translation is a
+one-liner rather than a manual `rm -rf`, and the folder is never the thing that
+decides: the manifest is checked against it, not believed.
 The residual hole — a hard link to an original made outside the folder — needs
 file identity that portable std does not expose, and is documented rather than
 half-checked.
+
+**And the copy says what it is.** Every command prints the seams it used; the
+copy carries the same list as a file. `.kintsugi-install` is plain
+tab-separated text — path last, so paths with spaces parse — recording the tool
+version, the engine, the game folder, the script, the patch (size, checksum,
+where it came from) and every file written, with its size and checksum. The
+checksum is FNV-1a: it **identifies, it does not authenticate**, which is the
+whole job — noticing that a file is not the one Kintsugi wrote. The host has no
+dependencies, so the format needs none either, and `.kintsugi-install` can be
+read in a terminal by the person deciding whether to trust the copy.
 
 ### 2. A patch changes only what it translates
 

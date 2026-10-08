@@ -40,7 +40,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
 | **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
-| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, and reading the copy back to prove it landed | working |
+| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, reading the copy back to prove it landed, and recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf` | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam №2…N** — other engines | the reason the body exists |
@@ -54,7 +54,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 124 tests, all fixtures synthesized
+cargo test                                     # 126 tests, all fixtures synthesized
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
 cargo run -p kintsugi -- inspect ./demo-game
@@ -179,12 +179,49 @@ the copy mounts as bluegale
 installed story.bdt into the copy: 9 of 14 line(s) differ from the original
 the original game folder is untouched (5 file(s), 'story.bdt' byte-identical)
 → play the repaired copy: kintsugi play repaired --auto
+wrote .kintsugi-install: what this copy is, and every file kintsugi put in it
 ```
 
 `9 of 14` because a script is not all prose: the four `$`/`%` labels are
 structure, counted in the total and never rewritten. The copy's `story.bdt` is
 byte-for-byte the patch `translate` wrote — a property the tests assert, since
 it means the two commands agree about what a repair is.
+
+That last line is the other half of the honesty: the copy carries a manifest of
+what was done to it, so "what did the repair tool touch?" is a question you
+answer by reading a file in the copy, not by trusting this README.
+
+```
+$ cat repaired/.kintsugi-install
+kintsugi-install	1
+tool	0.1.1
+engine	bluegale
+game	/tmp/kt-doc2/demo-game
+script	story.bdt
+patch	468	c8195db99f0670db	/tmp/kt-doc2/story.en.bdt
+file	139	1825695238904e2f	.kintsugi-demo
+file	580	057a2ac45b0b3fa8	game.inx
+file	818	3b66838dae77b258	game.snn
+file	468	c8195db99f0670db	story.bdt
+file	848	a38519df61d68354	title-x4-anime4k.png
+```
+
+And it is what makes translating a game a loop rather than a one-shot: fix a
+glossary entry, re-translate, and install again over your own previous copy —
+no `rm -rf` by hand, which is where a real game folder gets deleted by mistake.
+The manifest is checked *against* the folder rather than believed: same files,
+same sizes, same checksums, or the install refuses.
+
+```sh
+$ cargo run -p kintsugi -- install demo-game --script story.en2.bdt --into repaired
+replacing this folder's own previous install (5 file(s), every one unchanged since kintsugi wrote it, patch story.en.bdt)
+copied 5 file(s), 2799 byte(s), to repaired
+...
+```
+
+A copy that has been *used* is refused by name — `save01.dat`, or a script that
+was hand-edited after kintsugi wrote it — because a tool that overwrites a folder
+it did not just write cannot tell a stale copy from someone's installation.
 
 The offline path is the tested one, end to end:
 

@@ -31,8 +31,21 @@ impl Drop for TempDir {
 
 /// Run the CLI the way a user does and capture everything it said.
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kintsugi"))
-        .args(args)
+    run_with_env(args, &[])
+}
+
+/// The same, with environment variables set for the child.
+///
+/// Needed because `--mock` is deterministic: asking for two *different* patches
+/// out of one game means asking the mock translator to mark its output, which
+/// it does through `KINTSUGI_MOCK_MARKER`.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kintsugi"));
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
         .output()
         .expect("the kintsugi binary is built for this test")
 }
@@ -590,6 +603,129 @@ mod install {
             stderr(&output).contains("served from an archive"),
             "stderr: {}",
             stderr(&output)
+        );
+    }
+
+    /// Re-running the pipeline after fixing a translation must not mean
+    /// deleting a folder by hand — that is how a real game folder gets deleted
+    /// by mistake. Kintsugi recognises its own work instead.
+    #[test]
+    fn a_second_install_replaces_the_folders_own_previous_work() {
+        let temp = TempDir::new("install-again");
+        let (game, first) = game_and_patch(&temp, "again");
+        let copy = temp.0.join("repaired");
+        let install = |patch: &Path| {
+            run(&[
+                "install",
+                game.to_str().unwrap(),
+                "--script",
+                patch.to_str().unwrap(),
+                "--into",
+                copy.to_str().unwrap(),
+            ])
+        };
+        assert_eq!(install(&first).status.code(), Some(0));
+
+        // A different patch: the second run must land it, not refuse the folder.
+        let second = temp.0.join("patch-again-2.bdt");
+        let output = run_with_env(
+            &[
+                "translate",
+                game.to_str().unwrap(),
+                "--mock",
+                "--no-play",
+                "--write-script",
+                second.to_str().unwrap(),
+            ],
+            &[("KINTSUGI_MOCK_MARKER", "[second pass] ")],
+        );
+        assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+        assert_ne!(
+            fs::read(&first).unwrap(),
+            fs::read(&second).unwrap(),
+            "this test needs two different patches to be meaningful"
+        );
+
+        let again = install(&second);
+        assert_eq!(
+            again.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&again),
+            stderr(&again)
+        );
+        assert!(
+            stdout(&again).contains("replacing this folder's own previous install"),
+            "stdout: {}",
+            stdout(&again)
+        );
+        assert_eq!(
+            fs::read(copy.join("story.bdt")).unwrap(),
+            fs::read(&second).unwrap(),
+            "the second install did not land the second patch"
+        );
+        // Nothing was left behind from the first install.
+        let manifest = fs::read_to_string(copy.join(".kintsugi-install")).unwrap();
+        assert!(
+            manifest.contains(&format!("patch\t{}\t", fs::read(&second).unwrap().len())),
+            "the manifest still describes the first patch:\n{manifest}"
+        );
+    }
+
+    /// A copy that has been played in is not a copy this tool may overwrite:
+    /// the save game in it is the player's, not ours.
+    #[test]
+    fn a_copy_that_has_been_used_is_refused_by_name() {
+        let temp = TempDir::new("install-used");
+        let (game, patch) = game_and_patch(&temp, "used");
+        let copy = temp.0.join("repaired");
+        let install = || {
+            run(&[
+                "install",
+                game.to_str().unwrap(),
+                "--script",
+                patch.to_str().unwrap(),
+                "--into",
+                copy.to_str().unwrap(),
+            ])
+        };
+        assert_eq!(install().status.code(), Some(0));
+
+        fs::write(copy.join("save01.dat"), b"someone played this").unwrap();
+        let used = install();
+        assert_eq!(used.status.code(), Some(1), "stderr: {}", stderr(&used));
+        assert!(
+            stderr(&used).contains("save01.dat"),
+            "the refusal must name the file that stopped it: {}",
+            stderr(&used)
+        );
+        assert_eq!(
+            fs::read(copy.join("save01.dat")).unwrap(),
+            b"someone played this"
+        );
+
+        // And a copy whose installed script was hand-edited afterwards is the
+        // same case, reported with the reason rather than the bare name.
+        fs::remove_file(copy.join("save01.dat")).unwrap();
+        let mut edited = fs::read(copy.join("story.bdt")).unwrap();
+        edited.push(b'x');
+        fs::write(copy.join("story.bdt"), &edited).unwrap();
+        let changed = install();
+        assert_eq!(
+            changed.status.code(),
+            Some(1),
+            "stderr: {}",
+            stderr(&changed)
+        );
+        assert!(
+            stderr(&changed).contains("modified since kintsugi wrote it"),
+            "stderr: {}",
+            stderr(&changed)
+        );
+        assert_eq!(
+            fs::read(copy.join("story.bdt")).unwrap(),
+            edited,
+            "a refused install rewrote the file anyway"
         );
     }
 

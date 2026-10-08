@@ -328,7 +328,10 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     // with the patch bytes, so `read_script` parses the patch as this game's
     // script would be parsed.
     let mut overlay = open_game(dir)?;
-    overlay.push_front(Arc::new(InMemoryFile::new(target.as_str(), patch_bytes)));
+    overlay.push_front(Arc::new(InMemoryFile::new(
+        target.as_str(),
+        patch_bytes.clone(),
+    )));
     let (_, patch_mount) = registry.mount_best(&overlay)?;
     let patched = patch_mount.read_script(&target)?;
 
@@ -383,7 +386,20 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     let originals_before = tree_names(Path::new(dir))?;
     let target_bytes_before = std::fs::read(&target_path).ok();
 
-    // The copy.
+    // The copy. A folder Kintsugi made and nobody has touched since may be
+    // replaced; anything else is someone's folder and stays that way.
+    let previous = prepare_destination(&into)?;
+    if let Some(previous) = &previous {
+        println!(
+            "{}",
+            dim(format!(
+                "replacing this folder's own previous install ({} file(s), every one \
+                 unchanged since kintsugi wrote it, patch {})",
+                previous.files.len(),
+                previous.patch_name()
+            ))
+        );
+    }
     let (files, bytes, skipped) = copy_tree(Path::new(dir), &into)?;
     println!(
         "{}",
@@ -488,9 +504,32 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
             target.as_str()
         ))
     );
+    // What was written, in a file inside the copy: the seam list made
+    // readable, and the thing that lets a second install recognise its own
+    // work instead of asking a human to delete a folder by hand.
+    let manifest = InstallManifest {
+        tool: env!("CARGO_PKG_VERSION").to_string(),
+        engine: engine.clone(),
+        game: absolute(Path::new(dir)),
+        script: target.as_str().to_string(),
+        patch_size: patch_bytes.len() as u64,
+        patch_checksum: fnv1a(&patch_bytes),
+        patch_path: absolute(&patch_path),
+        files: Vec::new(),
+    };
+    let manifest = manifest.recording(&into, &previous)?;
+    manifest.write(&into)?;
+
     println!(
         "→ play the repaired copy: {}",
         dim(format!("kintsugi play {} --auto", into.display()))
+    );
+    println!(
+        "{}",
+        dim(format!(
+            "wrote {}: what this copy is, and every file kintsugi put in it",
+            INSTALL_MANIFEST
+        ))
     );
     Ok(())
 }
@@ -593,35 +632,311 @@ fn tree_names(root: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Copy a directory tree, refusing a destination that already holds anything.
+/// The file an install leaves in the copy: what this copy is, and every file
+/// Kintsugi put in it.
 ///
-/// The refusal is the same one `demo` makes, for the same reason: a tool that
-/// writes over a folder it did not create cannot tell a stale copy from
-/// someone's installation. Returns the file count, the bytes copied, and one
-/// human-readable line per thing it deliberately left out.
-fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64, Vec<String>)> {
-    if to.exists() {
-        let existing = tree_names(to)?;
-        if !existing.is_empty() {
-            let shown: Vec<&str> = existing.iter().take(4).map(String::as_str).collect();
-            let more = if existing.len() > 4 {
-                format!(" and {} more", existing.len() - 4)
-            } else {
-                String::new()
-            };
+/// This is the seam list in the artifact — a user asking "what did the repair
+/// tool touch?" should not have to read the tool's source, and a second
+/// install should not have to ask a human to delete a folder by hand. Plain
+/// text, one record per line, tab-separated, **path last** so that paths with
+/// spaces (the common case) parse. The host has no dependencies and this file
+/// needs none.
+const INSTALL_MANIFEST: &str = ".kintsugi-install";
+
+/// Which manifest format this is. A copy carrying a newer one is not
+/// something this binary is allowed to overwrite.
+const INSTALL_MANIFEST_VERSION: &str = "1";
+
+/// What an install recorded about itself.
+#[derive(Debug, PartialEq, Eq)]
+struct InstallManifest {
+    tool: String,
+    engine: String,
+    game: String,
+    script: String,
+    patch_size: u64,
+    patch_checksum: u64,
+    patch_path: String,
+    /// Files this install wrote: name, size, checksum.
+    files: Vec<(String, u64, u64)>,
+}
+
+impl InstallManifest {
+    fn patch_name(&self) -> String {
+        Path::new(&self.patch_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.patch_path.clone())
+    }
+
+    /// Walk the copy, check it against `previous` (if this is a re-install),
+    /// and record every file that is now in it.
+    ///
+    /// Files the previous install wrote that the game folder no longer has are
+    /// removed from the copy: they verified byte-for-byte against the manifest
+    /// first, so they are Kintsugi's own artifact and not a user's file — and
+    /// leaving them would make the next install refuse the folder it just
+    /// wrote. The removal is printed, never silent.
+    fn recording(mut self, into: &Path, previous: &Option<Self>) -> Result<Self> {
+        let mut names = tree_names(into)?;
+        names.retain(|name| name != INSTALL_MANIFEST);
+        let mut files = Vec::new();
+        for name in &names {
+            let bytes = std::fs::read(into.join(name))
+                .map_err(|e| Error::Io(format!("reading {}: {e}", into.join(name).display())))?;
+            files.push((name.clone(), bytes.len() as u64, fnv1a(&bytes)));
+        }
+        if let Some(previous) = previous {
+            let now: HashSet<&str> = files.iter().map(|(name, _, _)| name.as_str()).collect();
+            for (stale, _, _) in &previous.files {
+                if now.contains(stale.as_str()) {
+                    continue;
+                }
+                let path = into.join(stale);
+                std::fs::remove_file(&path)
+                    .map_err(|e| Error::Io(format!("removing {}: {e}", path.display())))?;
+                println!(
+                    "{}",
+                    dim(format!(
+                        "  · removed '{stale}': the previous install wrote it, this game \
+                         folder no longer has it, and it verified byte-for-byte before \
+                         being removed"
+                    ))
+                );
+            }
+        }
+        self.files = files;
+        Ok(self)
+    }
+
+    fn render(&self) -> String {
+        let mut text = format!("kintsugi-install\t{INSTALL_MANIFEST_VERSION}\n");
+        text.push_str(&format!("tool\t{}\n", self.tool));
+        text.push_str(&format!("engine\t{}\n", self.engine));
+        text.push_str(&format!("game\t{}\n", self.game));
+        text.push_str(&format!("script\t{}\n", self.script));
+        text.push_str(&format!(
+            "patch\t{}\t{:016x}\t{}\n",
+            self.patch_size, self.patch_checksum, self.patch_path
+        ));
+        for (name, size, checksum) in &self.files {
+            text.push_str(&format!("file\t{size}\t{checksum:016x}\t{name}\n"));
+        }
+        text
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let mut lines = text.lines();
+        let header = lines.next().unwrap_or_default();
+        let mut header_fields = header.split('\t');
+        let (Some("kintsugi-install"), Some(version)) =
+            (header_fields.next(), header_fields.next())
+        else {
+            return Err(Error::unsupported(
+                "install",
+                format!("'{INSTALL_MANIFEST}' is not a kintsugi install manifest"),
+            ));
+        };
+        if version != INSTALL_MANIFEST_VERSION {
             return Err(Error::unsupported(
                 "install",
                 format!(
-                    "'{}' already holds {} entr(ies) ({}{more}); refusing to write a \
-                     repaired copy over them — delete that folder or point --into at a \
-                     new one",
-                    to.display(),
-                    existing.len(),
-                    shown.join(", ")
+                    "'{INSTALL_MANIFEST}' is version {version} and this kintsugi writes \
+                     version {INSTALL_MANIFEST_VERSION}; refusing to write over a copy \
+                     made by another version"
                 ),
             ));
         }
+        let mut manifest = Self {
+            tool: String::new(),
+            engine: String::new(),
+            game: String::new(),
+            script: String::new(),
+            patch_size: 0,
+            patch_checksum: 0,
+            patch_path: String::new(),
+            files: Vec::new(),
+        };
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            match (fields.first().copied(), fields.len()) {
+                (Some("tool"), 2) => manifest.tool = fields[1].to_string(),
+                (Some("engine"), 2) => manifest.engine = fields[1].to_string(),
+                (Some("game"), 2) => manifest.game = fields[1].to_string(),
+                (Some("script"), 2) => manifest.script = fields[1].to_string(),
+                (Some("patch"), 4) => {
+                    manifest.patch_size = parse_field(fields[1], "patch size")?;
+                    manifest.patch_checksum = parse_checksum(fields[2])?;
+                    manifest.patch_path = fields[3].to_string();
+                }
+                (Some("file"), 4) => {
+                    let size = parse_field(fields[1], "file size")?;
+                    let checksum = parse_checksum(fields[2])?;
+                    manifest.files.push((fields[3].to_string(), size, checksum));
+                }
+                (Some(key), _) => {
+                    return Err(Error::unsupported(
+                        "install",
+                        format!(
+                            "'{INSTALL_MANIFEST}' has a '{key}' line this kintsugi does not \
+                             understand; leaving the folder alone"
+                        ),
+                    ));
+                }
+                (None, _) => {}
+            }
+        }
+        Ok(manifest)
     }
+
+    fn write(&self, into: &Path) -> Result<()> {
+        let path = into.join(INSTALL_MANIFEST);
+        std::fs::write(&path, self.render())
+            .map_err(|e| Error::Io(format!("writing {}: {e}", path.display())))
+    }
+}
+
+fn parse_field(text: &str, what: &str) -> Result<u64> {
+    text.parse::<u64>().map_err(|_| {
+        Error::unsupported(
+            "install",
+            format!("'{INSTALL_MANIFEST}' has a {what} that is not a number: '{text}'"),
+        )
+    })
+}
+
+fn parse_checksum(text: &str) -> Result<u64> {
+    u64::from_str_radix(text, 16).map_err(|_| {
+        Error::unsupported(
+            "install",
+            format!("'{INSTALL_MANIFEST}' has a checksum that is not hexadecimal: '{text}'"),
+        )
+    })
+}
+
+/// FNV-1a, 64-bit: enough to notice that a file is not the one Kintsugi wrote,
+/// which is the whole job. It **identifies, it does not authenticate** — an
+/// adversary who wants a changed file to look unchanged can arrange that, and
+/// a manifest is not a signed document.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// An absolute path for the record, without asking the filesystem to resolve
+/// anything: a manifest written into a copy must still describe the game if
+/// the game folder is later moved away.
+fn absolute(path: &Path) -> String {
+    match std::env::current_dir() {
+        Ok(cwd) if path.is_relative() => cwd.join(path).to_string_lossy().into_owned(),
+        _ => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Decide whether `into` may be written to, and report what is already there.
+///
+/// Three answers, and the middle one is the point:
+///
+/// * nothing there → `Ok(None)`, a fresh copy;
+/// * a folder Kintsugi wrote, still exactly as it was written (every file it
+///   listed is present with the recorded size and checksum, and there is
+///   nothing in there it did not write) → `Ok(Some(previous))`, a re-install;
+/// * anything else → a refusal that names what it found, because a tool that
+///   writes over a folder it did not create cannot tell a stale copy from
+///   someone's installation — or from a copy that has save games in it.
+fn prepare_destination(into: &Path) -> Result<Option<InstallManifest>> {
+    if into.exists() && !into.is_dir() {
+        return Err(Error::unsupported(
+            "install",
+            format!(
+                "--into {} is a file, not a folder: the copy is a folder the game can be \
+                 played from",
+                into.display()
+            ),
+        ));
+    }
+    let existing = if into.exists() {
+        tree_names(into)?
+    } else {
+        Vec::new()
+    };
+    if existing.is_empty() {
+        return Ok(None);
+    }
+    let manifest_path = into.join(INSTALL_MANIFEST);
+    if !manifest_path.is_file() {
+        return Err(occupied(existing.iter().map(String::as_str)));
+    }
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| Error::Io(format!("reading {}: {e}", manifest_path.display())))?;
+    let previous = InstallManifest::parse(&text)?;
+
+    // Verify the folder *against* the manifest rather than trusting where the
+    // manifest came from: if every file matches what it recorded, then
+    // overwriting this folder is exactly the operation it describes.
+    let recorded: HashSet<&str> = previous.files.iter().map(|(n, _, _)| n.as_str()).collect();
+    let mut foreign: Vec<String> = existing
+        .iter()
+        .filter(|name| name.as_str() != INSTALL_MANIFEST && !recorded.contains(name.as_str()))
+        .cloned()
+        .collect();
+    let mut changed: Vec<String> = Vec::new();
+    for (name, size, checksum) in &previous.files {
+        let path = into.join(name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            changed.push(format!("{name} (missing)"));
+            continue;
+        };
+        if bytes.len() as u64 != *size || fnv1a(&bytes) != *checksum {
+            changed.push(format!("{name} (modified since kintsugi wrote it)"));
+        }
+    }
+    foreign.sort();
+    changed.sort();
+    if !foreign.is_empty() || !changed.is_empty() {
+        let mut found = foreign.iter().map(|name| name.as_str()).collect::<Vec<_>>();
+        found.extend(changed.iter().map(String::as_str));
+        return Err(occupied(found.into_iter()));
+    }
+    Ok(Some(previous))
+}
+
+/// The refusal both "someone else's folder" and "a copy that has been used"
+/// produce. The list is the useful part, so it is always shown.
+fn occupied<'a>(names: impl Iterator<Item = &'a str>) -> Error {
+    let names: Vec<&str> = names.collect();
+    let shown: Vec<&str> = names.iter().take(4).copied().collect();
+    let more = if names.len() > shown.len() {
+        format!(" and {} more", names.len() - shown.len())
+    } else {
+        String::new()
+    };
+    Error::unsupported(
+        "install",
+        format!(
+            "the destination already holds {} thing(s) kintsugi did not write or that \
+             changed after it did ({}{more}); refusing to write a repaired copy over \
+             them — point --into at a new folder, or delete that folder yourself if \
+             those files do not matter",
+            names.len(),
+            shown.join(", ")
+        ),
+    )
+}
+
+/// Copy a directory tree into `to`, creating it.
+///
+/// The destination's right to be written over is [`prepare_destination`]'s
+/// decision, made before this runs. Returns the file count, the bytes copied,
+/// and one human-readable line per thing it deliberately left out.
+fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64, Vec<String>)> {
     std::fs::create_dir_all(to)
         .map_err(|e| Error::Io(format!("creating {}: {e}", to.display())))?;
 

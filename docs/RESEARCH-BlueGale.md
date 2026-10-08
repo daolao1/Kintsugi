@@ -280,7 +280,7 @@ the fixtures are synthesized (§9).
 Everything runnable in-tree was run when this document was written (2026-10-08):
 `cargo build --workspace` builds, `cargo test -p kintsugi-bluegale` passes 29
 unit + 10 integration tests, and `cargo test -p kintsugi` adds 5 host-level
-patch tests (`crates/kintsugi/tests/patch.rs`) plus 15 that run the CLI binary
+patch tests (`crates/kintsugi/tests/patch.rs`) plus 17 that run the CLI binary
 end to end (`crates/kintsugi/tests/cli.rs`), which cover the promises that can
 only be tested through a real process: the exit-code table, the refusals that
 keep every write outside the game folder, and `install`'s refusals — a
