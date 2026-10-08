@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark, quiet, and gold-on-black: the app shows a repair in progress. -->
+    <style name="Theme.Kintsugi" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:textColor">#FFD24A</item>
+        <item name="android:textColorPrimary">#FFD24A</item>
+    </style>
+</resources>

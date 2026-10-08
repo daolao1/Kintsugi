@@ -1,0 +1,25 @@
+[package]
+name = "kintsugi-android"
+description = "Kintsugi on Android: the same body, seams, and glaze behind a C ABI and a JNI bridge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# `cdylib` is what the APK loads; `rlib` lets the bridge logic be unit-tested
+# on the host, where there is no JVM and no NDK.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kintsugi-core.workspace = true
+kintsugi-bluegale = { workspace = true }
+kintsugi-video.workspace = true
+jni = { version = "0.21", optional = true }
+
+[features]
+default = []
+# The JNI symbols need a JVM to link against, so they are opt-in: the plain C
+# ABI builds and is verified anywhere, the JNI layer only on Android.
+jni-bridge = ["dep:jni"]

@@ -1,0 +1,13 @@
+[package]
+name = "kintsugi-video"
+description = "Glaze layer: Anime4K-inspired upscaling and frame interpolation for any engine's frames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Intentionally empty: the glaze is pure math over kintsugi-core frames.
+kintsugi-core.workspace = true

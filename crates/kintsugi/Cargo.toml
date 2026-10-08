@@ -1,0 +1,19 @@
+[package]
+name = "kintsugi"
+description = "The hands: terminal host that assembles the registry and plays repaired games"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kintsugi"
+path = "src/main.rs"
+
+[dependencies]
+kintsugi-core.workspace = true
+kintsugi-bluegale.workspace = true
+kintsugi-video.workspace = true
+kintsugi-translate.workspace = true

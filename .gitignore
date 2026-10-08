@@ -1,0 +1,25 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kintsugi demo artifacts
+/demo-game/
+*.png
+!docs/images/*.png
+
+# Android (platforms/android) — build outputs, machine-specific SDK path,
+# and the per-ABI engine libraries that `cargo ndk` regenerates.
+platforms/android/.gradle/
+platforms/android/build/
+platforms/android/app/build/
+platforms/android/local.properties
+platforms/android/app/src/main/jniLibs/**/*.so

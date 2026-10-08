@@ -1,0 +1,4 @@
+# `cargo ndk` writes one libkintsugi_android.so per ABI here; the binaries are
+# build products, not sources.
+*
+!.gitignore

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kintsugi 金缮</string>
+    <string name="run_demo">Run the demo game</string>
+    <string name="detect">Detect</string>
+    <string name="play">Play</string>
+    <string name="upscale">Glaze 4×</string>
+</resources>

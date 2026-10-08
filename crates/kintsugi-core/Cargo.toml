@@ -1,0 +1,16 @@
+[package]
+name = "kintsugi-core"
+description = "Kintsugi Engine core: VFS, detection, script IR, interpreter, codecs, plugin contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Intentionally empty.
+#
+# The core is the ceramic body of the vessel: it must hold its shape on its
+# own. Anything a seam needs beyond this crate belongs in that seam, so the
+# body never rots. See ARCHITECTURE.md ("zero-dependency body").

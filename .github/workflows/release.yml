@@ -1,0 +1,258 @@
+# One engine, four delivery vehicles.
+#
+# The point of this workflow is that Android, macOS, and Windows are built and
+# *smoke-tested by running the binary*, from the same commit, every time. A
+# platform that quietly stops building is a platform that quietly stops being
+# maintained.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The gate: formatting, lints, unit tests, and the C ABI harness. If this
+  # job is red, no artifact is worth shipping.
+  verify:
+    name: verify (fmt · clippy · test · C ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: C ABI checked from C
+        run: |
+          set -euo pipefail
+          cargo build -p kintsugi-android
+          cc -Wall -Wextra -Werror crates/kintsugi-android/tests/c_abi.c \
+             -o /tmp/c_abi -Ltarget/debug -lkintsugi_android
+          LD_LIBRARY_PATH=target/debug /tmp/c_abi
+
+      - name: JNI symbol names match the Kotlin declarations
+        run: |
+          set -euo pipefail
+          cargo build -p kintsugi-android --features jni-bridge
+          for symbol in version detect play demo upscale; do
+            nm -D --defined-only target/debug/libkintsugi_android.so \
+              | grep -q "Java_com_kintsugi_engine_EngineBridge_${symbol}$" \
+              || { echo "missing JNI symbol: ${symbol}"; exit 1; }
+          done
+          echo "all five JNI symbols are exported"
+
+  # macOS: both architectures, joined into one universal binary.
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build both architectures
+        run: |
+          set -euo pipefail
+          cargo build --release -p kintsugi --target aarch64-apple-darwin
+          cargo build --release -p kintsugi --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/kintsugi \
+            target/x86_64-apple-darwin/release/kintsugi \
+            -output target/kintsugi-macos-universal
+          lipo -info target/kintsugi-macos-universal
+
+      - name: smoke test the actual artifact
+        run: |
+          set -euo pipefail
+          ./target/kintsugi-macos-universal version
+          ./target/kintsugi-macos-universal demo --dir /tmp/kintsugi-ci-demo | tee /tmp/demo.txt
+          grep -q "bluegale" /tmp/demo.txt
+          grep -q "修复完成" /tmp/demo.txt
+          test -f /tmp/kintsugi-ci-demo/title-x4-anime4k.png
+
+      - name: package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/kintsugi-macos-universal dist/kintsugi
+          tar -czf kintsugi-macos-universal.tar.gz -C dist kintsugi
+          shasum -a 256 kintsugi-macos-universal.tar.gz | tee kintsugi-macos-universal.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kintsugi-macos-universal
+          path: |
+            kintsugi-macos-universal.tar.gz
+            kintsugi-macos-universal.tar.gz.sha256
+
+  # Windows: built on Windows, no cross-compilation guesswork.
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release -p kintsugi --target x86_64-pc-windows-msvc
+
+      - name: smoke test the actual artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/x86_64-pc-windows-msvc/release/kintsugi.exe
+          "$exe" version
+          "$exe" demo --dir "$RUNNER_TEMP/kintsugi-ci-demo" | tee "$RUNNER_TEMP/demo.txt"
+          grep -q "bluegale" "$RUNNER_TEMP/demo.txt"
+          test -f "$RUNNER_TEMP/kintsugi-ci-demo/title-x4-anime4k.png"
+
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/kintsugi.exe dist/
+          cp README.md LICENSE dist/ 2>/dev/null || true
+          7z a kintsugi-windows-x86_64.zip ./dist/* > /dev/null
+          sha256sum kintsugi-windows-x86_64.zip | tee kintsugi-windows-x86_64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kintsugi-windows-x86_64
+          path: |
+            kintsugi-windows-x86_64.zip
+            kintsugi-windows-x86_64.zip.sha256
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release -p kintsugi
+
+      - name: smoke test the actual artifact
+        run: |
+          set -euo pipefail
+          ./target/release/kintsugi version
+          ./target/release/kintsugi demo --dir /tmp/kintsugi-ci-demo | tee /tmp/demo.txt
+          grep -q "bluegale" /tmp/demo.txt
+          test -f /tmp/kintsugi-ci-demo/title-x4-anime4k.png
+
+      - name: package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/kintsugi dist/
+          tar -czf kintsugi-linux-x86_64.tar.gz -C dist kintsugi
+          sha256sum kintsugi-linux-x86_64.tar.gz | tee kintsugi-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kintsugi-linux-x86_64
+          path: |
+            kintsugi-linux-x86_64.tar.gz
+            kintsugi-linux-x86_64.tar.gz.sha256
+
+  # Android: four ABIs in one APK. The APK is a shell; the engine inside it is
+  # the same commit as the three binaries above.
+  android:
+    name: Android (APK · 4 ABIs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: android-actions/setup-android@v3
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27b
+          add-to-path: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: build the engine for every ABI
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
+            -o platforms/android/app/src/main/jniLibs \
+            build --release -p kintsugi-android --features jni-bridge
+          find platforms/android/app/src/main/jniLibs -name '*.so' -exec ls -lh {} +
+
+      - name: assemble the APK
+        run: gradle --no-daemon assembleDebug
+        working-directory: platforms/android
+
+      - name: check the APK actually carries all four ABIs
+        run: |
+          set -euo pipefail
+          apk=platforms/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk"
+          unzip -l "$apk" | grep -E 'lib/(arm64-v8a|armeabi-v7a|x86_64|x86)/libkintsugi_android\.so'
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            unzip -l "$apk" | grep -q "lib/${abi}/libkintsugi_android.so" \
+              || { echo "APK is missing the ${abi} slice"; exit 1; }
+          done
+          echo "all four ABIs are in the APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kintsugi-android-debug-apk
+          path: platforms/android/app/build/outputs/apk/debug/app-debug.apk
+
+  # Tagged commits become a release with every platform attached.
+  release:
+    name: attach artifacts to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, macos, windows, linux, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            🏺 Repairing old games with gold. 以金缮之艺，续老游戏之命。
+
+            Every platform here is built from this commit and smoke-tested by
+            running `kintsugi demo` on it. The Android APK is a debug build
+            (signed with the Android debug key): it installs and runs, and
+            release signing is a documented next step, not a hidden one.

@@ -1,0 +1,313 @@
+//! The plugin contract: how a golden seam attaches to the body.
+//!
+//! One engine = one crate = one [`EnginePlugin`]. The seam sees only the
+//! [`Vfs`] the host mounts; it answers two questions — *is this my engine?*
+//! ([`EnginePlugin::detect`]) and *give me a playable view of it*
+//! ([`EnginePlugin::mount`]). Everything else (script IR, images, audio,
+//! interpretation) is expressed in the body's types, so hosts and seams stay
+//! strangers to each other.
+//!
+//! Seams are linked statically through a [`Registry`]: Rust has no stable
+//! ABI, and a preservation engine must still build from source in twenty
+//! years. The trait boundary below is deliberately dylib-shaped, so a
+//! dynamic loader can be added later without rewriting any seam.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::asset::{Audio, Image};
+use crate::detect::{Confidence, Detection};
+use crate::error::{Error, Result};
+use crate::script::Script;
+use crate::vfs::{Vfs, VirtualPath};
+
+/// What a seam calls itself.
+pub struct PluginMetadata {
+    /// Short engine id, e.g. `"bluegale"`.
+    pub id: &'static str,
+    /// Implementing crate, e.g. `"kintsugi-bluegale"`.
+    pub crate_name: &'static str,
+    /// Human-facing engine name, e.g. `"BlueGale (ブルーゲイル)"`.
+    pub display_name: &'static str,
+    /// Seam crate version.
+    pub version: &'static str,
+    /// File extensions this seam understands (lower-cased, no dot).
+    pub file_extensions: &'static [&'static str],
+}
+
+impl PluginMetadata {
+    /// One-line summary for reports.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} {} [{}] — {}",
+            self.display_name,
+            self.version,
+            self.id,
+            self.file_extensions.join(", ")
+        )
+    }
+}
+
+/// A mounted game: seams hand back this view, not raw handles.
+#[derive(Debug)]
+pub struct MountInfo {
+    /// Engine id that mounted this game.
+    pub engine: String,
+    /// Every workaround, skip, and heuristic applied while mounting.
+    /// Displayed by hosts — the gold must stay visible.
+    pub notes: Vec<String>,
+}
+
+impl MountInfo {
+    /// New mount info for `engine` with no notes yet.
+    pub fn new(engine: impl Into<String>) -> Self {
+        Self {
+            engine: engine.into(),
+            notes: Vec::new(),
+        }
+    }
+
+    /// Record a visible work note.
+    pub fn note(&mut self, text: impl Into<String>) {
+        self.notes.push(text.into());
+    }
+}
+
+/// The playable view a seam builds over a mounted game.
+pub trait EngineMount: Send {
+    /// Engine and visible work notes.
+    fn info(&self) -> &MountInfo;
+
+    /// The overlaid VFS (mounted archives shadowing loose files).
+    fn vfs(&self) -> &Vfs;
+
+    /// Decode an image asset.
+    fn read_image(&self, path: &VirtualPath) -> Result<Image> {
+        let _ = path;
+        Err(Error::unsupported(
+            self.info().engine.clone(),
+            "this seam does not decode images yet",
+        ))
+    }
+
+    /// Read an audio asset as a pass-through container.
+    fn read_audio(&self, path: &VirtualPath) -> Result<Audio> {
+        let _ = path;
+        Err(Error::unsupported(
+            self.info().engine.clone(),
+            "this seam does not read audio yet",
+        ))
+    }
+
+    /// Translate a script into the body's IR.
+    fn read_script(&self, path: &VirtualPath) -> Result<Script> {
+        let _ = path;
+        Err(Error::unsupported(
+            self.info().engine.clone(),
+            "this seam does not translate scripts yet",
+        ))
+    }
+
+    /// Write a repaired script back out, when this seam knows how.
+    ///
+    /// `replacements` maps a command index — the same `id` a translation
+    /// entry carries — to the text that should stand in its place. A seam
+    /// that implements this is expected to change **only** those lines and
+    /// leave every other byte of the original file alone, because a patch
+    /// that quietly reformats a game is worse than no patch.
+    ///
+    /// The default refuses: a seam that cannot write must say so rather than
+    /// emit something plausible.
+    fn write_script(
+        &self,
+        path: &VirtualPath,
+        replacements: &BTreeMap<usize, String>,
+    ) -> Result<WrittenScript> {
+        let _ = (path, replacements);
+        Err(Error::unsupported(
+            self.info().engine.clone(),
+            "this seam cannot write scripts back yet",
+        ))
+    }
+}
+
+/// A repaired script, ready to be saved next to the original.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenScript {
+    /// The bytes to write. The caller chooses the path; seams never write.
+    pub data: Vec<u8>,
+    /// How many of the requested replacements were applied.
+    pub replaced: usize,
+    /// Command indices the original file does not have — ids drift when the
+    /// script and the translation come from different versions, and a silent
+    /// mismatch here is how a patch lands on the wrong line.
+    pub unmatched: Vec<usize>,
+}
+
+/// One dead engine's golden seam.
+pub trait EnginePlugin: Send + Sync {
+    /// Stable metadata for reports.
+    fn metadata(&self) -> &'static PluginMetadata;
+
+    /// Decide whether the mounted files belong to this engine.
+    ///
+    /// Return one [`Detection`] per opinion (usually the strongest one);
+    /// an empty `Vec` means "not mine". Detection must be read-only: no
+    /// writing, no moving, no repairing the fan's files.
+    fn detect(&self, vfs: &Vfs) -> Result<Vec<Detection>>;
+
+    /// Build a playable view of the game.
+    ///
+    /// Called only after the host chose this seam (usually via
+    /// [`Registry::detect_all`] + [`Registry::mount_best`]). Mounting may
+    /// read everything but must still modify nothing on disk.
+    fn mount(&self, vfs: &Vfs) -> Result<Box<dyn EngineMount>>;
+}
+
+/// The set of seams compiled into a host.
+#[derive(Default)]
+pub struct Registry {
+    plugins: Vec<Arc<dyn EnginePlugin>>,
+}
+
+impl Registry {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register one seam.
+    pub fn register(&mut self, plugin: Arc<dyn EnginePlugin>) -> &mut Self {
+        self.plugins.push(plugin);
+        self
+    }
+
+    /// All registered seams, in registration order.
+    pub fn plugins(&self) -> &[Arc<dyn EnginePlugin>] {
+        &self.plugins
+    }
+
+    /// Number of registered seams.
+    pub fn len(&self) -> usize {
+        self.plugins.len()
+    }
+
+    /// Whether no seam is registered.
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+
+    /// Find a seam by engine id.
+    pub fn find(&self, id: &str) -> Option<Arc<dyn EnginePlugin>> {
+        self.plugins.iter().find(|p| p.metadata().id == id).cloned()
+    }
+
+    /// Ask every seam what it thinks, strongest opinion first.
+    pub fn detect_all(&self, vfs: &Vfs) -> Vec<(usize, Detection)> {
+        let mut verdicts: Vec<(usize, Detection)> = Vec::new();
+        for (index, plugin) in self.plugins.iter().enumerate() {
+            if let Ok(detections) = plugin.detect(vfs) {
+                for detection in detections {
+                    verdicts.push((index, detection));
+                }
+            }
+        }
+        verdicts.sort_by(|a, b| {
+            b.1.confidence
+                .cmp(&a.1.confidence)
+                .then_with(|| a.1.engine.cmp(b.1.engine))
+        });
+        verdicts
+    }
+
+    /// Detect, pick the most confident seam, and mount through it.
+    ///
+    /// Fails when nothing scores at least [`Confidence::Possible`].
+    pub fn mount_best(&self, vfs: &Vfs) -> Result<(Arc<dyn EnginePlugin>, Box<dyn EngineMount>)> {
+        let verdicts = self.detect_all(vfs);
+        let Some((index, best)) = verdicts.first() else {
+            return Err(Error::unsupported(
+                "auto-detect",
+                "no registered engine recognizes these files",
+            ));
+        };
+        if best.confidence < Confidence::Possible {
+            return Err(Error::unsupported(
+                "auto-detect",
+                "best verdict is only 'unlikely'; refusing to mount",
+            ));
+        }
+        let plugin = self.plugins[*index].clone();
+        let mount = plugin.mount(vfs)?;
+        Ok((plugin, mount))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubPlugin {
+        metadata: &'static PluginMetadata,
+        confidence: Confidence,
+    }
+
+    impl EnginePlugin for StubPlugin {
+        fn metadata(&self) -> &'static PluginMetadata {
+            self.metadata
+        }
+
+        fn detect(&self, _vfs: &Vfs) -> Result<Vec<Detection>> {
+            Ok(vec![Detection::new(
+                self.metadata.id,
+                self.confidence,
+                "stub",
+            )])
+        }
+
+        fn mount(&self, _vfs: &Vfs) -> Result<Box<dyn EngineMount>> {
+            Err(Error::Plugin("stub does not mount".into()))
+        }
+    }
+
+    fn meta(id: &'static str) -> &'static PluginMetadata {
+        static A: std::sync::OnceLock<PluginMetadata> = std::sync::OnceLock::new();
+        static B: std::sync::OnceLock<PluginMetadata> = std::sync::OnceLock::new();
+        match id {
+            "aaa" => A.get_or_init(|| PluginMetadata {
+                id: "aaa",
+                crate_name: "stub-aaa",
+                display_name: "Stub A",
+                version: "0",
+                file_extensions: &["aaa"],
+            }),
+            _ => B.get_or_init(|| PluginMetadata {
+                id: "bbb",
+                crate_name: "stub-bbb",
+                display_name: "Stub B",
+                version: "0",
+                file_extensions: &["bbb"],
+            }),
+        }
+    }
+
+    #[test]
+    fn registry_sorts_by_confidence() {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(StubPlugin {
+            metadata: meta("aaa"),
+            confidence: Confidence::Certain,
+        }));
+        registry.register(Arc::new(StubPlugin {
+            metadata: meta("bbb"),
+            confidence: Confidence::Likely,
+        }));
+
+        let vfs = Vfs::new();
+        let verdicts = registry.detect_all(&vfs);
+        assert_eq!(verdicts[0].1.engine, "aaa");
+        assert_eq!(verdicts[1].1.engine, "bbb");
+        assert_eq!(registry.find("bbb").map(|p| p.metadata().id), Some("bbb"));
+        assert!(registry.find("zzz").is_none());
+    }
+}

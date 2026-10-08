@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kintsugi-core",
+    "crates/kintsugi-bluegale",
+    "crates/kintsugi-video",
+    "crates/kintsugi-translate",
+    "crates/kintsugi-android",
+    "crates/kintsugi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/daolao1/Kintsugi"
+authors = ["Kintsugi Engine contributors"]
+
+[workspace.dependencies]
+kintsugi-core = { path = "crates/kintsugi-core" }
+kintsugi-bluegale = { path = "crates/kintsugi-bluegale" }
+kintsugi-video = { path = "crates/kintsugi-video" }
+kintsugi-translate = { path = "crates/kintsugi-translate" }
+kintsugi-android = { path = "crates/kintsugi-android" }
+encoding_rs = "0.8"
+
+[profile.release]
+lto = "thin"
+strip = true
