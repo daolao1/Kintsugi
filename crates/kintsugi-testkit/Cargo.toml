@@ -1,6 +1,6 @@
 [package]
-name = "kintsugi-bluegale"
-description = "Golden seam for the BlueGale engine: SNN/INX archives, ZBM/BBM images, BDT scripts"
+name = "kintsugi-testkit"
+description = "The seam contract as a function: what every engine plugin must do, checked instead of described"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,3 @@ authors.workspace = true
 
 [dependencies]
 kintsugi-core.workspace = true
-encoding_rs.workspace = true
-
-[dev-dependencies]
-kintsugi-testkit.workspace = true

@@ -85,6 +85,17 @@ That default is a design decision, not a convenience. A seam that cannot do
 something must say so, in the user's face, with its own name attached. A silent
 empty `Vec<u8>` or a blank image would be indistinguishable from success.
 
+The contract is **executable**, not just described: `kintsugi-testkit` turns
+the rules on this page into `assert_seam_contract(&plugin, &[fixture])`, which
+every seam runs in its own test suite (BlueGale's is
+`crates/kintsugi-bluegale/tests/conformance.rs`). It checks that a name is
+never evidence, that a `Certain` verdict can actually be mounted, that a seam
+names itself in every verdict and mount, that an empty folder is nobody's game,
+and that `write_script` with no replacements returns the file byte-for-byte.
+The checker has its own tests against eight deliberately broken seams, so the
+rules are enforced rather than asserted. Adding engine №2 starts at
+[docs/ADDING-AN-ENGINE.md](docs/ADDING-AN-ENGINE.md).
+
 ### Detection: an extension is never evidence
 
 `Detection` carries a `Confidence` on an ordered ladder, and the ladder is

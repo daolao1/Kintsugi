@@ -43,7 +43,8 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, reading the copy back to prove it landed, and recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf` | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
-| **Seam №2…N** — other engines | the reason the body exists |
+| **Seam contract**: `kintsugi-testkit` — a new engine runs the same checks BlueGale does (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, and tested against eight deliberately broken seams |
+| **Seam №2…N** — other engines | the reason the body exists; [adding one](docs/ADDING-AN-ENGINE.md) is a crate and two registration lines |
 | BlueGale **AMV** video | *not implemented* — an honest hole, see [research notes](docs/RESEARCH-BlueGale.md) |
 
 ---
@@ -54,7 +55,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 126 tests, all fixtures synthesized
+cargo test                                     # 137 tests, all fixtures synthesized
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
 cargo run -p kintsugi -- inspect ./demo-game

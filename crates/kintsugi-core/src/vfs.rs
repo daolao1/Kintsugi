@@ -94,6 +94,68 @@ pub trait FileSource: Send + Sync {
     fn list(&self) -> Vec<(VirtualPath, u64)>;
 }
 
+/// A file source that lives in memory.
+///
+/// Two jobs, one type. As a **stand-in for a game folder** it lets a test (or a
+/// shell that already holds the bytes — a ZIP, a network fetch, an Android
+/// `content://` handle) hand a seam a game without inventing a temporary
+/// directory. As an **overlay** it can shadow a single path in a larger VFS,
+/// which is how the host shows a seam a file the user named on the command line
+/// without pretending the file is part of the game.
+#[derive(Clone, Debug, Default)]
+pub struct MemorySource {
+    files: BTreeMap<VirtualPath, Vec<u8>>,
+}
+
+impl MemorySource {
+    /// An empty source.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A source holding one file.
+    pub fn single(path: &str, bytes: impl Into<Vec<u8>>) -> Self {
+        let mut source = Self::new();
+        source.insert(path, bytes);
+        source
+    }
+
+    /// Add a file, replacing any file already under that virtual path.
+    pub fn insert(&mut self, path: &str, bytes: impl Into<Vec<u8>>) -> &mut Self {
+        self.files.insert(VirtualPath::new(path), bytes.into());
+        self
+    }
+
+    /// The number of files held.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether no files are held.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+impl FileSource for MemorySource {
+    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+        match self.files.get(path) {
+            Some(bytes) => Ok(bytes.clone()),
+            None => Err(Error::NotFound(format!(
+                "'{path}' is not in this in-memory source (it holds {} file(s))",
+                self.files.len()
+            ))),
+        }
+    }
+
+    fn list(&self) -> Vec<(VirtualPath, u64)> {
+        self.files
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.len() as u64))
+            .collect()
+    }
+}
+
 /// Serves files from a real directory tree, read-only.
 #[derive(Debug, Clone)]
 pub struct DirectorySource {
@@ -309,6 +371,64 @@ mod tests {
             source.read(&evil),
             Err(Error::NotFound(msg)) if msg.contains("traversal")
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod memory_source_tests {
+    use super::*;
+
+    #[test]
+    fn holds_what_was_put_in_it_and_says_what_it_does_not() {
+        let mut source = MemorySource::new();
+        assert!(source.is_empty());
+        source.insert("Story.BDT", b"hello".to_vec());
+        assert_eq!(source.len(), 1);
+        // Paths canonicalize on the way in, so a seam's `VirtualPath::new` and
+        // a caller's string meet in the same place.
+        assert_eq!(
+            source.read(&VirtualPath::new("story.bdt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(source.list(), vec![(VirtualPath::new("story.bdt"), 5u64)]);
+        let missing = source.read(&VirtualPath::new("other.bdt")).unwrap_err();
+        assert!(
+            format!("{missing}").contains("holds 1 file(s)"),
+            "the refusal should say what the source does have: {missing}"
+        );
+    }
+
+    #[test]
+    fn shadows_one_path_in_a_larger_vfs_and_leaves_the_rest_alone() {
+        let dir =
+            std::env::temp_dir().join(format!("kintsugi-memory-overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("story.bdt"), b"the original").unwrap();
+        std::fs::write(dir.join("other.bdt"), b"another original").unwrap();
+
+        let mut vfs = Vfs::from_directory(&dir).unwrap();
+        vfs.push_front(Arc::new(MemorySource::single("story.bdt", "the patch")));
+        assert_eq!(
+            vfs.read(&VirtualPath::new("story.bdt")).unwrap(),
+            b"the patch"
+        );
+        assert_eq!(
+            vfs.read(&VirtualPath::new("other.bdt")).unwrap(),
+            b"another original",
+            "the overlay must shadow only the path it holds"
+        );
+        // The shadowed file keeps its place in the listing, with the size of
+        // the bytes that will actually be read.
+        let listed = vfs.list();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|(path, _)| path.as_str() == "story.bdt")
+                .map(|(_, size)| *size),
+            Some(9),
+            "listing: {listed:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

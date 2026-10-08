@@ -17,7 +17,7 @@ use kintsugi_core::error::{Error, Result};
 use kintsugi_core::plugin::{EngineMount, Registry};
 use kintsugi_core::runtime::{Event, Host, Interpreter};
 use kintsugi_core::script::{ChoiceOption, Command, Script};
-use kintsugi_core::vfs::{FileSource, Vfs, VirtualPath};
+use kintsugi_core::vfs::{MemorySource, Vfs, VirtualPath};
 use kintsugi_translate::{
     Glossary, LlmTranslator, MockTranslator, Translator, extract_with_raw, write_jsonl,
 };
@@ -328,7 +328,7 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     // with the patch bytes, so `read_script` parses the patch as this game's
     // script would be parsed.
     let mut overlay = open_game(dir)?;
-    overlay.push_front(Arc::new(InMemoryFile::new(
+    overlay.push_front(Arc::new(MemorySource::single(
         target.as_str(),
         patch_bytes.clone(),
     )));
@@ -532,38 +532,6 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
         ))
     );
     Ok(())
-}
-
-/// A file that exists only in memory, so a seam can read a script the user
-/// named on the command line through the same code path it uses for a game.
-struct InMemoryFile {
-    path: VirtualPath,
-    bytes: Vec<u8>,
-}
-
-impl InMemoryFile {
-    fn new(path: &str, bytes: Vec<u8>) -> Self {
-        Self {
-            path: VirtualPath::new(path),
-            bytes,
-        }
-    }
-}
-
-impl FileSource for InMemoryFile {
-    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
-        if path == &self.path {
-            return Ok(self.bytes.clone());
-        }
-        Err(Error::NotFound(format!(
-            "'{path}' is not in this in-memory source (it holds only '{}')",
-            self.path
-        )))
-    }
-
-    fn list(&self) -> Vec<(VirtualPath, u64)> {
-        vec![(self.path.clone(), self.bytes.len() as u64)]
-    }
 }
 
 /// The words of a line — the part a translation may replace — or `None` when

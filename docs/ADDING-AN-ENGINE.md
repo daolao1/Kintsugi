@@ -48,6 +48,9 @@ repository.workspace = true
 [dependencies]
 kintsugi-core.workspace = true
 encoding_rs = { workspace = true }     # only if the engine needs CP932
+
+[dev-dependencies]
+kintsugi-testkit.workspace = true      # the seam contract, as a test
 ```
 
 Add `"crates/kintsugi-examplesoft"` to `members` and
@@ -221,6 +224,49 @@ but **byte-exact** game:
 pub fn write_demo_game(dir: &Path) -> Result<Vec<PathBuf>> { /* … */ }
 ```
 
+### The contract is executable
+
+Before the end-to-end test, let the testkit check the rules that are true of
+*every* engine, so you do not have to infer them from this document:
+
+```rust
+// crates/kintsugi-examplesoft/tests/conformance.rs
+use kintsugi_core::detect::Confidence;
+use kintsugi_testkit::{SeamFixture, assert_seam_contract};
+
+#[test]
+fn the_examplesoft_seam_keeps_the_seam_contract() {
+    let fixture = SeamFixture::new("an ExampleSoft release", Confidence::Certain)
+        .file("scene.exa", make_exa(&[("SCENE.EXB", 0, 128)]))
+        .file("scene.exb", make_exb("$start\r\nこんにちは。\r\n%fin\r\n"))
+        .script("scene.exb");
+
+    assert_seam_contract(&plugin(), &[fixture]);
+}
+```
+
+`SeamFixture` builds the files in memory (`kintsugi_core::vfs::MemorySource`), so
+the fixture needs no temporary directory and cannot be mistaken for an installed
+game. The checker then insists, with a message that says what to do:
+
+1. a file **name is never evidence** — it feeds the seam a text file with each
+   of its own claimed extensions and fails it for claiming `Likely` or
+   `Certain` from that alone;
+2. `Certain` **means mountable** — a verdict the seam cannot follow through on
+   is a lie the user reads as "we know this game";
+3. a seam **names itself** — every verdict and every mount must carry the id
+   from `metadata()`, because that id is what a user sees attached to a repair;
+4. an **empty folder is nobody's game** — no verdict at `Possible` or better;
+5. **changing nothing changes nothing** — `write_script` with an empty
+   replacement map must return the file byte-for-byte, or refuse. This is §2 of
+   [ARCHITECTURE.md](../ARCHITECTURE.md) applied to your writer, and it is the
+   rule that catches a writer which quietly re-encodes a file it was not asked
+   to touch.
+
+The checker is itself tested against deliberately broken seams
+(`crates/kintsugi-testkit/src/lib.rs`, eight of them), because a contract check
+that cannot fail is decoration.
+
 Then test the seam the way a user would use it:
 
 ```rust
@@ -299,6 +345,7 @@ the fix belongs in `kintsugi-core` where every engine benefits.
 - [ ] Every heuristic recorded with `MountInfo::note`
 - [ ] Strict encoding for text output (refuse, never substitute)
 - [ ] Fixtures synthesize byte-exact files; no commercial data committed
+- [ ] `assert_seam_contract(&plugin(), &[fixture])` passes
 - [ ] End-to-end mount test + corrupt-input tests
 - [ ] Registered in `crates/kintsugi` and `crates/kintsugi-android`
 - [ ] `cargo fmt` · `cargo clippy --all-targets --all-features -- -D warnings` · `cargo test --workspace`
