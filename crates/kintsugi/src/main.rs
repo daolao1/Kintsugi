@@ -5,7 +5,6 @@
 //! No arguments prints the usage; start with `kintsugi demo`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1339,13 +1338,12 @@ impl Host for TerminalHost {
 /// would be asking them to do the tool's job. A mounted disc still works, since a
 /// mount point is a folder.
 /// Whether this image's note has still to be printed, and mark it said.
-fn noted_image(image: &Path) -> bool {
-    static SAID: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> =
+fn noted_note(note: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
         std::sync::OnceLock::new();
     let said = SAID.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
-    let absolute = fs::canonicalize(image).unwrap_or_else(|_| image.to_path_buf());
     match said.lock() {
-        Ok(mut said) => said.insert(absolute),
+        Ok(mut said) => said.insert(note.to_string()),
         // A poisoned lock means another thread panicked while holding it; the
         // note is worth printing again rather than swallowing.
         Err(_) => true,
@@ -1353,133 +1351,16 @@ fn noted_image(image: &Path) -> bool {
 }
 
 fn open_game(dir: &str) -> Result<Vfs> {
-    let root = PathBuf::from(dir);
-    if root.is_dir() {
-        let mut vfs = Vfs::from_directory(&root)?;
-
-        // A folder that holds a disc image beside its own files is how a game
-        // shipped on a disc is repaired: the repaired script goes in the
-        // folder and shadows the copy inside the image, because the folder is
-        // searched first. That shadowing is the whole reason this works, so it
-        // is asserted rather than assumed — the image goes *under* the folder,
-        // never over it.
-        let mut images: Vec<PathBuf> = fs::read_dir(&root)
-            .map_err(|e| Error::Io(format!("reading {}: {e}", root.display())))?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
-            })
-            .collect();
-        images.sort();
-        match images.len() {
-            0 => {}
-            1 => {
-                let image = &images[0];
-                // Said once per image: a command opens the same game several
-                // times over (once to read it, once to write into a copy, once
-                // to read the copy back), and a note repeated four times is a
-                // note nobody reads.
-                if noted_image(image) {
-                    println!(
-                        "{}",
-                        dim(format!(
-                            "reading the disc image beside these files: {} (a file in this folder \
-                             shadows the image's own copy of it)",
-                            image.display()
-                        ))
-                    );
-                }
-                vfs.push(Arc::new(kintsugi_core::iso::IsoSource::open(image)?));
-            }
-            several => {
-                return Err(Error::unsupported(
-                    "a folder holding several disc images",
-                    format!(
-                        "'{}' holds {several} disc images ({}); point at the one to read, because \
-                         a folder of several games is nobody's game",
-                        root.display(),
-                        images
-                            .iter()
-                            .map(|image| format!(
-                                "'{}'",
-                                image.file_name().unwrap_or_default().to_string_lossy()
-                            ))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ));
-            }
-        }
-        return Ok(vfs);
-    }
-    let extension = root
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    match extension.as_str() {
-        "iso" => Vfs::from_iso(&root),
-        // A `.mds` is a description of a disc, not the disc: it names the
-        // sectors of a `.mdf`. BlueGale's release ships one beside its `.iso`,
-        // so the useful answer is to read the image that is actually there
-        // rather than to explain the difference.
-        "mds" => {
-            let beside = root.with_extension("iso");
-            if beside.is_file() {
-                let note = format!(
-                    "reading {} beside {}, because a .mds describes a disc rather than \
-                     holding one",
-                    beside.display(),
-                    root.display()
-                );
-                println!("{}", dim(&note));
-                return Vfs::from_iso(&beside);
-            }
-            Err(Error::unsupported(
-                "disc description",
-                format!(
-                    "'{}' is a disc description and there is no '{}' beside it to read; point \
-                     at the image itself",
-                    root.display(),
-                    beside.display()
-                ),
-            ))
-        }
-        // An archive that holds a disc image is a delivery format, not a game.
-        // Saying which file to extract and how beats a generic error, and it
-        // keeps a compressed format's decoder out of a project that would then
-        // have to keep it correct forever.
-        "rar" | "7z" | "zip" | "tar" | "gz" | "bz2" | "xz" => Err(Error::unsupported(
-            "an archive holding a game",
-            format!(
-                "'{}' is a compressed archive; Kintsugi reads games, not archives. Extract it \
-                 first — on macOS `bsdtar -xf '{}'` (or The Unarchiver) — and point this \
-                 command at the folder or the .iso that comes out",
-                root.display(),
-                root.display()
-            ),
-        )),
-        _ => {
-            if root.is_file() {
-                Err(Error::unsupported(
-                    "game input",
-                    format!(
-                        "'{}' is a file Kintsugi cannot open; point at the game's folder or at \
-                         a disc image (.iso)",
-                        root.display()
-                    ),
-                ))
-            } else {
-                Err(Error::NotFound(format!(
-                    "there is nothing at '{}'",
-                    root.display()
-                )))
-            }
+    let (vfs, notes) = Vfs::open_game(Path::new(dir))?;
+    // Said once per note: a command opens the same game several times over
+    // (once to read it, once to write into a copy, once to read the copy
+    // back), and a note repeated four times is a note nobody reads.
+    for note in notes {
+        if noted_note(&note) {
+            println!("{}", dim(&note));
         }
     }
+    Ok(vfs)
 }
 
 fn print_verdicts(vfs: &Vfs) -> Result<Vec<(usize, kintsugi_core::detect::Detection)>> {
@@ -1941,6 +1822,39 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
         println!("{} {}", gold("source batch:"), source_path.display());
     }
 
+    // Resume: lines an interrupted run already wrote into the JSONL are not
+    // sent again. Each batch is appended as it lands (below), so a run that
+    // dies at line 8,000 is a paused run, not a lost one. Ids the current
+    // script no longer has are dropped here — a stale file must not leak
+    // lines into a different repair.
+    let mut resumed: BTreeMap<usize, String> = BTreeMap::new();
+    let mut remaining = entries.clone();
+    if !args.on("mock")
+        && let Some(jsonl_dir) = args.flag("jsonl-dir")
+    {
+        let progress_path =
+            PathBuf::from(jsonl_dir).join(format!("translated.{target_lang}.jsonl"));
+        if progress_path.is_file() {
+            let current: HashSet<usize> = entries.iter().map(|e| e.id).collect();
+            for entry in kintsugi_translate::read_jsonl(&progress_path)? {
+                if current.contains(&entry.id) && !resumed.contains_key(&entry.id) {
+                    resumed.insert(entry.id, entry.text);
+                }
+            }
+            remaining.retain(|e| !resumed.contains_key(&e.id));
+            if !resumed.is_empty() {
+                println!(
+                    "{}",
+                    dim(format!(
+                        "resuming: {} line(s) already translated, {} to go",
+                        resumed.len(),
+                        remaining.len()
+                    ))
+                );
+            }
+        }
+    }
+
     let (translated, reports) = if args.on("mock") {
         // The default marker is deliberately CP932-clean: `--mock
         // --write-script` must produce a real, playable patch offline, and a
@@ -2000,7 +1914,35 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
             llm.name(),
             llm.model
         );
-        llm.translate_with_report(&entries, &source_lang, &target_lang)?
+        let jsonl_dir = args.flag("jsonl-dir").map(PathBuf::from);
+        let total = entries.len();
+        let done = std::cell::Cell::new(resumed.len());
+        let mut on_batch = |chunk: &[kintsugi_translate::TranslationEntry]| -> Result<()> {
+            done.set(done.get() + chunk.len());
+            println!("{}", dim(format!("  · {}/{total} line(s)", done.get())));
+            if let Some(dir) = &jsonl_dir {
+                let path = dir.join(format!("translated.{target_lang}.jsonl"));
+                kintsugi_translate::append_jsonl(&path, chunk)?;
+            }
+            Ok(())
+        };
+        let (new_translated, reports) =
+            llm.translate_with_progress(&remaining, &source_lang, &target_lang, &mut on_batch)?;
+        // The full list, in the script's order: resumed lines and fresh ones,
+        // with any line neither produced kept as its original text.
+        let mut by_id = resumed;
+        for entry in new_translated {
+            by_id.insert(entry.id, entry.text);
+        }
+        let translated: Vec<kintsugi_translate::TranslationEntry> = entries
+            .iter()
+            .map(|e| kintsugi_translate::TranslationEntry {
+                id: e.id,
+                speaker: e.speaker.clone(),
+                text: by_id.remove(&e.id).unwrap_or_else(|| e.text.clone()),
+            })
+            .collect();
+        (translated, reports)
     };
 
     let changed = translated

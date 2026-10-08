@@ -104,6 +104,11 @@ pub struct LlmTranslator {
     pub temperature: f32,
 }
 
+/// The HTTP-shaped closure [`LlmTranslator::translate_chunk_via`] splits and
+/// retries: a chunk in, translated entries and their report out.
+type SendChunk<'a> =
+    dyn FnMut(&[&TranslationEntry]) -> Result<(Vec<TranslationEntry>, BatchOutput)> + 'a;
+
 impl LlmTranslator {
     /// A translator for `api_base` / `model`, defaults elsewhere.
     pub fn new(
@@ -145,6 +150,23 @@ impl LlmTranslator {
         source_lang: &str,
         target_lang: &str,
     ) -> Result<(Vec<TranslationEntry>, Vec<BatchOutput>)> {
+        self.translate_with_progress(entries, source_lang, target_lang, &mut |_| Ok(()))
+    }
+
+    /// Translate, calling `on_batch` with every chunk the moment it lands.
+    ///
+    /// A long run over a slow gateway is where this earns its keep: each
+    /// batch the host persists as it arrives is a batch an interrupted run
+    /// never has to ask for again. The callback's error aborts the run —
+    /// pretending a batch was saved when it was not would be worse than
+    /// stopping.
+    pub fn translate_with_progress(
+        &self,
+        entries: &[TranslationEntry],
+        source_lang: &str,
+        target_lang: &str,
+        on_batch: &mut dyn FnMut(&[TranslationEntry]) -> Result<()>,
+    ) -> Result<(Vec<TranslationEntry>, Vec<BatchOutput>)> {
         if entries.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -175,7 +197,7 @@ impl LlmTranslator {
 
         for (batch_index, chunk) in sendable.chunks(self.batch_size.max(1)).enumerate() {
             let (mut translated, report) =
-                self.translate_chunk(chunk, source_lang, target_lang, batch_index)?;
+                self.translate_chunk(chunk, source_lang, target_lang, batch_index, on_batch)?;
             out.append(&mut translated);
             reports.push(report);
         }
@@ -194,6 +216,61 @@ impl LlmTranslator {
     }
 
     fn translate_chunk(
+        &self,
+        chunk: &[&TranslationEntry],
+        source_lang: &str,
+        target_lang: &str,
+        batch_index: usize,
+        on_batch: &mut dyn FnMut(&[TranslationEntry]) -> Result<()>,
+    ) -> Result<(Vec<TranslationEntry>, BatchOutput)> {
+        Self::translate_chunk_via(chunk, batch_index, on_batch, &mut |smaller| {
+            self.translate_chunk_http(smaller, source_lang, target_lang, batch_index)
+        })
+    }
+
+    /// The retry-and-split policy, with the sending half injectable so the
+    /// policy can be tested without a network.
+    ///
+    /// A batch no attempt gets through is usually a gateway timing out on
+    /// the big request, not a bad line: halve it and try each half. Only a
+    /// single line that fails every attempt is a real failure, and the error
+    /// names it. A failure deep in the left half aborts before the right is
+    /// tried — the retries inside `send` are where transients are absorbed,
+    /// and a persisted left half is never sent again.
+    fn translate_chunk_via(
+        chunk: &[&TranslationEntry],
+        batch_index: usize,
+        on_batch: &mut dyn FnMut(&[TranslationEntry]) -> Result<()>,
+        send: &mut SendChunk<'_>,
+    ) -> Result<(Vec<TranslationEntry>, BatchOutput)> {
+        match send(chunk) {
+            Ok((translated, report)) => {
+                on_batch(&translated)?;
+                Ok((translated, report))
+            }
+            Err(_) if chunk.len() > 1 => {
+                let mid = chunk.len() / 2;
+                let (mut left, left_report) =
+                    Self::translate_chunk_via(&chunk[..mid], batch_index, on_batch, send)?;
+                let (mut right, right_report) =
+                    Self::translate_chunk_via(&chunk[mid..], batch_index, on_batch, send)?;
+                left.append(&mut right);
+                Ok((
+                    left,
+                    BatchOutput {
+                        batch: batch_index,
+                        requested: left_report.requested + right_report.requested,
+                        translated: left_report.translated + right_report.translated,
+                        unchanged: left_report.unchanged + right_report.unchanged,
+                        extra_ids: left_report.extra_ids + right_report.extra_ids,
+                    },
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn translate_chunk_http(
         &self,
         chunk: &[&TranslationEntry],
         source_lang: &str,
@@ -260,10 +337,21 @@ impl LlmTranslator {
                 std::thread::sleep(Duration::from_millis(500 * attempt as u64));
             }
         }
+        let what = if chunk.len() == 1 {
+            format!("line {}", chunk[0].id)
+        } else {
+            format!(
+                "{} lines (ids {}..{})",
+                chunk.len(),
+                chunk.first().map(|e| e.id).unwrap_or(0),
+                chunk.last().map(|e| e.id).unwrap_or(0)
+            )
+        };
         Err(Error::Plugin(format!(
-            "{}: batch {} failed after {} attempt(s): {}",
+            "{}: batch {} ({}) failed after {} attempt(s): {}",
             self.name(),
             batch_index,
+            what,
             self.max_attempts.max(1),
             last_error
         )))
@@ -411,6 +499,104 @@ impl Translator for MockTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunk_report(chunk: &[&TranslationEntry]) -> (Vec<TranslationEntry>, BatchOutput) {
+        (
+            chunk.iter().map(|e| (*e).clone()).collect(),
+            BatchOutput {
+                batch: 0,
+                requested: chunk.len(),
+                translated: chunk.len(),
+                unchanged: 0,
+                extra_ids: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn a_chunk_the_gateway_will_not_take_is_split_until_it_passes() {
+        // A gateway that refuses anything over two lines: the five-line batch
+        // must arrive as 2 + (1 + 2) — the left half lands first, then the
+        // right half split — each persisted the moment it lands.
+        let entries: Vec<TranslationEntry> =
+            (0..5).map(|i| entry(i, &format!("text {i}"))).collect();
+        let refs: Vec<&TranslationEntry> = entries.iter().collect();
+        let mut persisted = Vec::new();
+        let (out, report) = LlmTranslator::translate_chunk_via(
+            &refs,
+            0,
+            &mut |chunk| {
+                persisted.push(chunk.len());
+                Ok(())
+            },
+            &mut |chunk| {
+                if chunk.len() > 2 {
+                    return Err(Error::Plugin("gateway 504".to_string()));
+                }
+                Ok(chunk_report(chunk))
+            },
+        )
+        .unwrap();
+        assert_eq!(out.len(), 5, "every line must arrive exactly once");
+        assert_eq!(persisted, vec![2, 1, 2], "the order batches landed");
+        assert_eq!(report.requested, 5);
+        assert_eq!(report.translated, 5);
+    }
+
+    #[test]
+    fn a_single_line_that_fails_every_attempt_is_a_real_failure() {
+        let entries: Vec<TranslationEntry> =
+            (0..3).map(|i| entry(i, &format!("text {i}"))).collect();
+        let refs: Vec<&TranslationEntry> = entries.iter().collect();
+        let mut persisted = 0;
+        let error = LlmTranslator::translate_chunk_via(
+            &refs,
+            7,
+            &mut |_| {
+                persisted += 1;
+                Ok(())
+            },
+            &mut |_| Err(Error::Plugin("the gateway is gone".to_string())),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(persisted, 0, "nothing may be reported as landed");
+        assert!(error.contains("the gateway is gone"), "{error}");
+    }
+
+    #[test]
+    fn a_landed_left_half_is_kept_when_the_right_half_fails() {
+        // Lines 0..1 pass, line 2 never does: the run aborts, but the two
+        // landed lines were handed to the caller first — persistence is what
+        // makes an abort a pause instead of a loss.
+        let entries: Vec<TranslationEntry> =
+            (0..3).map(|i| entry(i, &format!("text {i}"))).collect();
+        let refs: Vec<&TranslationEntry> = entries.iter().collect();
+        let mut persisted = Vec::new();
+        let result = LlmTranslator::translate_chunk_via(
+            &refs,
+            0,
+            &mut |chunk| {
+                persisted.extend(chunk.iter().map(|e| e.id));
+                Ok(())
+            },
+            &mut |chunk| {
+                if chunk.iter().any(|e| e.id == 2) && chunk.len() == 1 {
+                    return Err(Error::Plugin("line 2 poisons the request".to_string()));
+                }
+                if chunk.iter().any(|e| e.id == 2) && chunk.len() > 1 {
+                    return Err(Error::Plugin("still too big".to_string()));
+                }
+                Ok(chunk_report(chunk))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            persisted,
+            vec![0, 1],
+            "the good half landed before the abort"
+        );
+    }
 
     fn entry(id: usize, text: &str) -> TranslationEntry {
         TranslationEntry {

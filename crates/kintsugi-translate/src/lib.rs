@@ -23,5 +23,7 @@
 mod entry;
 mod translator;
 
-pub use entry::{TranslationEntry, apply, extract, extract_with_raw, read_jsonl, write_jsonl};
+pub use entry::{
+    TranslationEntry, append_jsonl, apply, extract, extract_with_raw, read_jsonl, write_jsonl,
+};
 pub use translator::{BatchOutput, Glossary, LlmTranslator, MockTranslator, Translator};

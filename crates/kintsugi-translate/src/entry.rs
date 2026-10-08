@@ -151,6 +151,29 @@ pub fn write_jsonl(path: &Path, entries: &[TranslationEntry]) -> Result<()> {
     fs::write(path, body).map_err(|e| Error::Io(format!("writing {}: {e}", path.display())))
 }
 
+/// Append entries to a JSONL file, creating it if needed.
+///
+/// Resume lives here: a long run writes each batch as it lands, so an
+/// interrupted run is a paused run, and the next invocation skips every line
+/// the file already holds.
+pub fn append_jsonl(path: &Path, entries: &[TranslationEntry]) -> Result<()> {
+    use std::io::Write;
+    let mut body = String::new();
+    for entry in entries {
+        let line = serde_json::to_string(entry)
+            .map_err(|e| Error::Plugin(format!("serializing entry {}: {e}", entry.id)))?;
+        body.push_str(&line);
+        body.push('\n');
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| Error::Io(format!("opening {}: {e}", path.display())))?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| Error::Io(format!("appending to {}: {e}", path.display())))
+}
+
 /// Read entries from a JSONL file.
 ///
 /// Blank lines are tolerated (diff-friendly), malformed lines are not.

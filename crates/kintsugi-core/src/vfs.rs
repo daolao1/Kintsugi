@@ -369,6 +369,132 @@ impl Vfs {
         Ok(vfs)
     }
 
+    /// Open a game — a folder, a disc image, or a disc description — and say
+    /// what had to be explained along the way.
+    ///
+    /// This is the one implementation of "what counts as a game on disk";
+    /// every shell (the CLI, the desktop window, the Android activity) opens
+    /// games through here and presents the returned notes in its own way, so
+    /// the folder-shadows-the-image rule has exactly one home and one set of
+    /// tests. A folder that holds a disc image beside its own files is how a
+    /// game shipped on a disc is repaired: the repaired script goes in the
+    /// folder and shadows the copy inside the image, because the folder is
+    /// searched first. That shadowing is the whole reason this works, so it
+    /// is asserted rather than assumed — the image goes *under* the folder,
+    /// never over it.
+    pub fn open_game(path: &Path) -> Result<(Self, Vec<String>)> {
+        if path.is_dir() {
+            let mut vfs = Self::from_directory(path)?;
+            let mut images: Vec<PathBuf> = fs::read_dir(path)
+                .map_err(|e| Error::Io(format!("reading {}: {e}", path.display())))?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|candidate| {
+                    candidate.is_file()
+                        && candidate
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
+                })
+                .collect();
+            images.sort();
+            let mut notes = Vec::new();
+            match images.len() {
+                0 => {}
+                1 => {
+                    let image = &images[0];
+                    notes.push(format!(
+                        "reading the disc image beside these files: {} (a file in this folder \
+                         shadows the image's own copy of it)",
+                        image.display()
+                    ));
+                    vfs.push(Arc::new(crate::iso::IsoSource::open(image)?));
+                }
+                several => {
+                    return Err(Error::unsupported(
+                        "a folder holding several disc images",
+                        format!(
+                            "'{}' holds {several} disc images ({}); point at the one to read, \
+                             because a folder of several games is nobody's game",
+                            path.display(),
+                            images
+                                .iter()
+                                .map(|image| format!(
+                                    "'{}'",
+                                    image.file_name().unwrap_or_default().to_string_lossy()
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
+            return Ok((vfs, notes));
+        }
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        match extension.as_str() {
+            "iso" => Ok((Self::from_iso(path)?, Vec::new())),
+            // A `.mds` is a description of a disc, not the disc: it names the
+            // sectors of a `.mdf`. BlueGale's release ships one beside its
+            // `.iso`, so the useful answer is to read the image that is
+            // actually there rather than to explain the difference.
+            "mds" => {
+                let beside = path.with_extension("iso");
+                if beside.is_file() {
+                    let note = format!(
+                        "reading {} beside {}, because a .mds describes a disc rather than \
+                         holding one",
+                        beside.display(),
+                        path.display()
+                    );
+                    return Ok((Self::from_iso(&beside)?, vec![note]));
+                }
+                Err(Error::unsupported(
+                    "disc description",
+                    format!(
+                        "'{}' is a disc description and there is no '{}' beside it to read; \
+                         point at the image itself",
+                        path.display(),
+                        beside.display()
+                    ),
+                ))
+            }
+            // An archive that holds a disc image is a delivery format, not a
+            // game. Saying which file to extract and how beats a generic
+            // error, and it keeps a compressed format's decoder out of a
+            // project that would then have to keep it correct forever.
+            "rar" | "7z" | "zip" | "tar" | "gz" | "bz2" | "xz" => Err(Error::unsupported(
+                "an archive holding a game",
+                format!(
+                    "'{}' is a compressed archive; Kintsugi reads games, not archives. Extract \
+                     it first — on macOS `bsdtar -xf '{}'` (or The Unarchiver) — and point this \
+                     command at the folder or the .iso that comes out",
+                    path.display(),
+                    path.display()
+                ),
+            )),
+            _ => {
+                if path.is_file() {
+                    Err(Error::unsupported(
+                        "game input",
+                        format!(
+                            "'{}' is a file Kintsugi cannot open; point at the game's folder or \
+                             at a disc image (.iso)",
+                            path.display()
+                        ),
+                    ))
+                } else {
+                    Err(Error::NotFound(format!(
+                        "there is nothing at '{}'",
+                        path.display()
+                    )))
+                }
+            }
+        }
+    }
+
     /// Number of mounted sources.
     pub fn source_count(&self) -> usize {
         self.sources.len()
@@ -470,6 +596,67 @@ impl fmt::Debug for Vfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kintsugi-vfs-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn open_game_reads_a_plain_folder_with_no_notes() {
+        let dir = tempdir("folder");
+        fs::write(dir.join("story.txt"), b"hello").unwrap();
+        let (vfs, notes) = Vfs::open_game(&dir).unwrap();
+        assert!(notes.is_empty());
+        assert!(vfs.read(&VirtualPath::new("story.txt")).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_game_refuses_a_folder_of_two_disc_images_by_name() {
+        let dir = tempdir("two-isos");
+        // Empty files: the refusal must come before either image is parsed,
+        // because it is about ambiguity, not about the discs' contents.
+        fs::write(dir.join("a.iso"), b"").unwrap();
+        fs::write(dir.join("b.iso"), b"").unwrap();
+        let err = Vfs::open_game(&dir).unwrap_err().to_string();
+        assert!(err.contains("2 disc images"), "{err}");
+        assert!(err.contains("a.iso"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_game_refuses_an_archive_with_extraction_guidance() {
+        let dir = tempdir("archive");
+        let archive = dir.join("game.rar");
+        fs::write(&archive, b"Rar!").unwrap();
+        let err = Vfs::open_game(&archive).unwrap_err().to_string();
+        assert!(err.contains("reads games, not archives"), "{err}");
+        assert!(err.contains("bsdtar"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_game_refuses_a_disc_description_without_its_disc() {
+        let dir = tempdir("mds");
+        let mds = dir.join("game.mds");
+        fs::write(&mds, b"MEDIA DESCRIPTOR").unwrap();
+        let err = Vfs::open_game(&mds).unwrap_err().to_string();
+        assert!(err.contains("disc description"), "{err}");
+        assert!(err.contains("game.iso"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_game_says_so_when_there_is_nothing_there() {
+        let dir = tempdir("missing");
+        let err = Vfs::open_game(&dir.join("nope")).unwrap_err().to_string();
+        assert!(err.contains("there is nothing at"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn path_normalization() {
