@@ -36,6 +36,29 @@ pub(crate) const DIRECTORY_START: usize = 0x2C;
 /// describing a table the size of a disc.
 const MAX_STRINGS: usize = 1 << 22;
 
+/// The opcode that shows a line of the story, as `1a <channel> <line:u32>`.
+const SHOW_OPCODE: u8 = 0x1A;
+
+/// How many channels the show opcode has.
+///
+/// Measured, not assumed: on the release this seam was written against, the
+/// bytes that follow `1a` are 0 (6,496 times), 2 (3,381) and 1 (2,109), and
+/// every other value occurs exactly once, with line number 0 — the shape of a
+/// coincidence rather than of an instruction. Those three cover 11,840 of the
+/// story's 11,864 lines.
+const SHOW_CHANNELS: u8 = 3;
+
+/// One line the code shows, and where in the code it says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Show {
+    /// File offset of the instruction.
+    pub at: usize,
+    /// Which channel the line is shown on; 0 is narration, 1 and 2 dialogue.
+    pub channel: u8,
+    /// Index into [`Story::strings`].
+    pub line: usize,
+}
+
 /// One `(offset, size)` pair of the record list.
 #[derive(Clone, Copy, Debug)]
 struct Record {
@@ -135,6 +158,49 @@ impl Story {
     /// The bytes this story was read from.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Every line the code shows, in the order the code shows them.
+    ///
+    /// This is the one thing the flat string table cannot say for itself, and
+    /// the reason the seam used to hand every line over as raw text. The code
+    /// before the text turns out to be readable as instructions of the form
+    /// `1a <channel> <line:u32>`, and on the release this was written against
+    /// 11,986 of them cover 11,840 of the 11,864 lines.
+    ///
+    /// Order is the claim, not decoration: 11,684 of the 11,985 steps between
+    /// one instruction and the next are exactly `+1`, so the code walks the
+    /// table in runs — 302 of them, the longest 3,549 lines — and those runs
+    /// are the story's scenes. Where a run breaks, the story branches or a
+    /// scene ends; which of the two it is would need the branch instructions,
+    /// which this seam still does not read.
+    ///
+    /// A line can be shown more than once: 122 instructions repeat a line an
+    /// earlier one already showed. All of them are kept, because the same words
+    /// in two scenes are shown twice.
+    pub fn shows(&self) -> Vec<Show> {
+        // The story's own index sits between the code and the text, and is not
+        // code; everything before it is. The text block is after it and cannot
+        // hold a `0x1a` at all — no line of it contains a control byte.
+        let end = self.table.index_at.min(self.bytes.len());
+        let mut shows = Vec::new();
+        let mut at = 0usize;
+        while at + 6 <= end {
+            if self.bytes[at] == SHOW_OPCODE && self.bytes[at + 1] < SHOW_CHANNELS {
+                let mut four = [0u8; 4];
+                four.copy_from_slice(&self.bytes[at + 2..at + 6]);
+                let line = u32::from_le_bytes(four) as usize;
+                if line < self.strings.len() {
+                    shows.push(Show {
+                        at,
+                        channel: self.bytes[at + 1],
+                        line,
+                    });
+                }
+            }
+            at += 1;
+        }
+        shows
     }
 
     /// The file with `replacements` standing in for the lines they name.

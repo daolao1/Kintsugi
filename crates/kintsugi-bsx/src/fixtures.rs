@@ -192,7 +192,17 @@ pub fn make_bsarc(entries: &[(&str, &[u8])]) -> Vec<u8> {
 /// indistinguishable from a name list, and the reader refuses a file with two
 /// equally likely stories rather than picking one — so a short story here would
 /// test the refusal, not the reader.
+/// A story whose code shows every line, cycling through the three channels.
 pub fn make_story(lines: &[&str]) -> Vec<u8> {
+    let channels = [0u8, 1, 2];
+    let every: Vec<(u8, usize)> = (0..lines.len()).map(|i| (channels[i % 3], i)).collect();
+    make_story_showing(lines, &every)
+}
+
+/// A story whose code shows exactly `shows`, as `(channel, line)` in the order
+/// the code holds them. Lines left out are lines the code never shows — which a
+/// real story has, and which the seam has to keep rather than drop.
+pub fn make_story_showing(lines: &[&str], shows: &[(u8, usize)]) -> Vec<u8> {
     let names: [&[&str]; 3] = [
         &["@harem", "@harem_flag"],
         &["#bgm", "#day", "#time"],
@@ -212,9 +222,27 @@ pub fn make_story(lines: &[&str]) -> Vec<u8> {
     debug_assert_eq!(out.len(), DIRECTORY_START);
 
     // The directory describes records that do not exist yet, so it is reserved
-    // first and filled in after the tables have been laid out.
+    // first and filled in after the tables have been laid out. Record 0 is the
+    // code, then an index and a block for each table.
     let directory = out.len();
-    out.resize(directory + tables.len() * 2 * 8, 0);
+    out.resize(directory + (1 + tables.len() * 2) * 8, 0);
+
+    // The code: `1a <channel> <line:u32>`, the instruction the release's own
+    // script is full of.
+    let mut code = Vec::new();
+    for (channel, line) in shows {
+        code.push(0x1A);
+        code.push(*channel);
+        code.extend_from_slice(&(*line as u32).to_le_bytes());
+    }
+    while code.len() % 8 != 0 {
+        code.push(0);
+    }
+    let code_at = out.len();
+    out.extend_from_slice(&code);
+    let record_at = directory;
+    out[record_at..record_at + 4].copy_from_slice(&(code_at as u32).to_le_bytes());
+    out[record_at + 4..record_at + 8].copy_from_slice(&(code.len() as u32).to_le_bytes());
 
     let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
     for table in &tables {
@@ -245,7 +273,8 @@ pub fn make_story(lines: &[&str]) -> Vec<u8> {
             .into_iter()
             .enumerate()
         {
-            let at = directory + (record * 2 + slot) * 8;
+            // The code record holds slot 0, so the tables start at slot 1.
+            let at = directory + (1 + record * 2 + slot) * 8;
             out[at..at + 4].copy_from_slice(&(offset as u32).to_le_bytes());
             out[at + 4..at + 8].copy_from_slice(&(size as u32).to_le_bytes());
         }

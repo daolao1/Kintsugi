@@ -1,6 +1,6 @@
 //! The BSX seam: detection, mounting and asset decoding.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use kintsugi_core::asset::{Audio, Image};
@@ -374,20 +374,56 @@ impl EngineMount for BsxMount {
             detail: refused.to_string(),
         })?;
 
-        // One line per command, in the story's own order: the ids a translation
-        // carries are the indices this table is indexed by, which is what makes
-        // a repair able to land on the line it names.
+        // The code decides what a line is shown as and in what order. Reading
+        // the table in index order would be reading the dictionary rather than
+        // the book, which is what this seam used to do and said so about.
+        let plan = command_plan(&story);
+        let shows = story.shows();
+        let mut narration = 0usize;
+        let mut dialogue = 0usize;
         let mut script = Script::new(path.clone());
-        script.warnings.push(format!(
-            "{} line(s) of story handed over as raw lines: BSScript keeps its prose in one flat \
-             table, and which line a given scene shows is decided by bytecode this seam does not \
-             read yet, so a line's neighbours here are its neighbours in the file, not in the \
-             scene",
-            story.strings().len()
-        ));
-        for line in story.strings() {
-            script.commands.push(Command::RawLine(line.clone()));
+        for (channel, line) in &plan {
+            let text = story.strings()[*line].clone();
+            match channel {
+                Some(0) => {
+                    narration += 1;
+                    script.commands.push(Command::Narration(text));
+                }
+                Some(_) => {
+                    dialogue += 1;
+                    script.commands.push(Command::Dialogue {
+                        speaker: None,
+                        text,
+                    });
+                }
+                // Shown by nothing the code says: the words are real, the kind
+                // is not known, and the body has a variant for exactly that.
+                None => script.commands.push(Command::RawLine(text)),
+            }
         }
+
+        let runs = shows
+            .windows(2)
+            .filter(|pair| pair[1].line != pair[0].line + 1)
+            .count()
+            + usize::from(!shows.is_empty());
+        script.warnings.push(format!(
+            "{} line(s) of story in the order the code shows them: {narration} on the narration \
+             channel and {dialogue} on a dialogue channel, from {} show instruction(s) in {runs} \
+             run(s) of consecutive lines. The channel says which text box the game draws, not who \
+             is speaking, so no line is given a speaker. A branch is not decoded: the runs are \
+             walked one after the other, so this is every line in the order the story can reach \
+             it, not one playthrough.{}",
+            story.strings().len(),
+            shows.len(),
+            match command_plan(&story).len() - shows.len() {
+                0 => String::new(),
+                kept => format!(
+                    " {kept} line(s) the code never shows are kept at the end as raw lines rather \
+                     than dropped."
+                ),
+            }
+        ));
         Ok(script)
     }
 
@@ -427,21 +463,86 @@ impl EngineMount for BsxMount {
             context: path.to_string(),
             detail: refused.to_string(),
         })?;
-        let repair = story
-            .rebuild(replacements)
-            .map_err(|refused| Error::Script {
+
+        // The ids a translation carries are the positions of the commands
+        // `read_script` handed over, so the same walk of the code turns an id
+        // back into the line a repair can move. A story is read the same way
+        // twice, which is what makes a repair land on the words it names.
+        let plan = command_plan(&story);
+        let mut wanted: BTreeMap<usize, String> = BTreeMap::new();
+        let mut unmatched = Vec::new();
+        let mut clashes = Vec::new();
+        for (id, text) in replacements {
+            let Some((_, line)) = plan.get(*id).copied() else {
+                unmatched.push(*id);
+                continue;
+            };
+            match wanted.get(&line) {
+                Some(existing) if existing != text => clashes.push((*id, line)),
+                _ => {
+                    wanted.insert(line, text.clone());
+                }
+            }
+        }
+        if !clashes.is_empty() {
+            // One line shown in two scenes is one string in the file. A
+            // translation that gives it two different readings cannot be
+            // honoured in both places, and picking one would silently lose the
+            // other.
+            return Err(Error::Script {
                 context: format!("'{path}'"),
-                detail: refused.to_string(),
-            })?;
+                detail: format!(
+                    "the same line is shown more than once and the translation gives it different \
+                     words at different places ({}). This seam repairs the line itself, so both \
+                     places would change together; it refuses rather than pick one of them",
+                    clashes
+                        .iter()
+                        .map(|(id, line)| format!("command {id} at line {line}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        let repair = story.rebuild(&wanted).map_err(|refused| Error::Script {
+            context: format!("'{path}'"),
+            detail: refused.to_string(),
+        })?;
 
         // A story is a file of its own here, so the repair is one file: the
         // index rewritten in place and the text block after it, with every
         // other byte of the game's script untouched.
+        // Ids the command list does not have, and lines the story does not
+        // have, are the same complaint to whoever wrote the translation.
+        let mut missing = unmatched;
+        missing.extend(repair.unmatched.iter().copied());
+        missing.sort_unstable();
+        missing.dedup();
         Ok(WrittenScript::loose(
             path.clone(),
             repair.bytes,
             repair.replaced,
-            repair.unmatched,
+            missing,
         ))
     }
+}
+
+/// The commands [`BsxPlugin::read_script`] hands over, in order: every line the
+/// code shows, then the lines it never shows.
+///
+/// This is the one place that decides what a command id means. Reading and
+/// repairing both go through it, so an id cannot drift between the translation
+/// that names it and the repair that has to land on it.
+fn command_plan(story: &Story) -> Vec<(Option<u8>, usize)> {
+    let shows = story.shows();
+    let shown: BTreeSet<usize> = shows.iter().map(|show| show.line).collect();
+    let mut plan: Vec<(Option<u8>, usize)> = shows
+        .iter()
+        .map(|show| (Some(show.channel), show.line))
+        .collect();
+    for line in 0..story.strings().len() {
+        if !shown.contains(&line) {
+            plan.push((None, line));
+        }
+    }
+    plan
 }

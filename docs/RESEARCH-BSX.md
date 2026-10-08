@@ -124,8 +124,11 @@ Colour-mode and compression distribution over all 765 images of the release:
 Of the 765 images, **456 are `BSS-Composition`** — a second header at `+0x20`
 composing a picture from parts at `±x`/`±y` offsets — and 309 are plain. The
 168 BMPs are the only other image files. Together with the 3,444 Ogg files that
-is 4,377, which is exactly the number of files the mount reports, so no file in
-these archives is unaccounted for.
+is 4,377 — every file these archives hold, with none unaccounted for. The mount
+reports 4,408 for the whole game, and the 31 that are not in an archive are the
+disc's own loose files: 12 in `exe/`, among them the story (`bsx.dat`), its
+config (`bsx.ini`), a CG list (`cg.dat`, 2,504 bytes, not a `BSScript`) and a
+`scene.dat` that has not been opened.
 
 **Implemented:** colour modes 0, 1, 2 with compression 0 and 1. Every declared
 `unpacked size` in the release equals `width × height × 4` (or `× 1` for indexed),
@@ -266,10 +269,33 @@ and repairs it**; what follows is what is established, and how.
   the repaired file with a parser written independently of the seam and
   comparing every line against the original.
 
-**Not implemented:** the bytecode, and the records that are not string tables —
-`0x4534e`+11,864, `0x45460`+1,688, `0x45b00`+2,006, `0x462e0`+15,528,
-`0x49f90`+35,204. Those are where the classification (`Narration`, `Dialogue`,
-`Choice`) would come from, and one measurement says how far away it is.
+**The show instruction.** The classification is no longer missing. The code
+turns out to be readable as instructions of the form `1a <channel> <line:u32>`:
+scanning the file up to the story's index finds 11,986 of them, where the
+two-byte prefix alone would appear about six times by chance. The channel byte
+is 0 (6,496 times), 2 (3,381) and 1 (2,109); every other value occurs exactly
+once, with line number 0, which is what a coincidence looks like. They cover
+11,840 of the story's 11,864 lines.
+
+What the channels are is not a guess either — the lines themselves say it.
+Channel 0 carries `■■■　真理奈ＥＮＤ　■■■`, `真理奈は先に食べていたらしく、
+ミルクティーを飲んでいた。` and `……。`: narration, no quotes. Channels 1 and 2
+carry `「う、うぅっ……」`, `「やぁ、おはよう」` and `『クスクス……』`: spoken
+lines, in the two text boxes the game draws. So the instruction says which box,
+not who is speaking, and the seam gives a dialogue line no speaker rather than
+invent one.
+
+Order is the other half. Sorting the instructions by where they sit in the code
+and looking at the line numbers, **11,684 of the 11,985 steps are exactly `+1`**:
+the code walks the table in 302 runs, the longest 3,549 lines, and those runs are
+the story's scenes. Between two runs the story branches or a scene ends — which
+of the two is what a branch decoder would have to say, and this is where the
+seam stops.
+
+**Not implemented:** the branch instructions, so `read_script` walks the runs one
+after the other and hands over every line the story can reach rather than one
+playthrough; and the records that are not string tables — `0x4534e`+11,864,
+`0x45460`+1,688, `0x45b00`+2,006, `0x462e0`+15,528, `0x49f90`+35,204.
 
 The first record is **not** a table of line references. Read as 4-byte integers,
 29 of its 2,966 values are below 11,864 — 1%, against a chance level of 0%. Read

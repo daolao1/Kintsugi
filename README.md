@@ -36,7 +36,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | --- | --- |
 | **Body** — engine-agnostic asset/script IR, VFS, runtime, detection registry, zero dependencies | working |
 | **Seam №1 — BlueGale (ブルーゲイル)**: SNN+INX archives, ZBM/BBM bitmaps, BDT scripts | working |
-| **Seam №2 — BlueGale BSX (the 2008 engine)**: BSArc archives (4,377 files read out of a 937 MB disc image), BSG pictures (RLE, indexed and true colour), and its compiled `BSScript` story — **read, translated and repaired**: 11,864 lines out of a 2008 release, bytecode untouched ([research notes](docs/RESEARCH-BSX.md)) | working |
+| **Seam №2 — BlueGale BSX (the 2008 engine)**: BSArc archives (4,377 files read out of a 937 MB disc image), BSG pictures (RLE, indexed and true colour), and its compiled `BSScript` story — **read, classified, translated and repaired**: 11,986 `1a <channel> <line>` instructions typed into narration and dialogue in 302 scene runs, 11,864 lines translated out of a 2008 release ([research notes](docs/RESEARCH-BSX.md)) | working |
 | **Disc images**: point a command at a game folder, an `.iso`, or the `.mds` beside one — and a folder holding an image is a game too, with its own files shadowing the image's (which is how a repaired script is installed over a disc) | working |
 | **Glaze — HD upscaling**: `nearest`, `bilinear`, `bicubic`, `lanczos3`, `anime4k` (Anime4K-style preset) | working |
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |

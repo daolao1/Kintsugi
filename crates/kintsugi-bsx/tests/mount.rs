@@ -5,7 +5,9 @@
 //! failures are at the joints: an archive that parses but does not serve, a
 //! prefix that hides a file, a picture that decodes to the wrong row order.
 
-use kintsugi_bsx::fixtures::{demo_release, make_bsarc, make_bsg, make_bsx_dat};
+use kintsugi_bsx::fixtures::{
+    demo_release, make_bsarc, make_bsg, make_bsx_dat, make_story_showing,
+};
 use kintsugi_core::plugin::{EngineMount, EnginePlugin};
 use kintsugi_core::vfs::VirtualPath;
 
@@ -118,6 +120,97 @@ fn a_folder_of_loose_pictures_is_mounted_without_an_archive() {
     assert_eq!(image.width, 1);
 }
 
+/// A line the code never shows is still a line of the story. The seam used to
+/// hand over the whole table and say the order was the file's; now that it can
+/// read the code, it must not lose the lines the code has nothing to say about.
+#[test]
+fn a_line_the_code_never_shows_is_kept_and_labelled() {
+    // Four lines or more: a story as short as the fixture's three-name cast
+    // list is refused as ambiguous, which is the rule this test must not break.
+    let lines = [
+        "shown first",
+        "never shown",
+        "shown last",
+        "also never shown",
+    ];
+    let mut source = kintsugi_core::vfs::MemorySource::new();
+    source.insert("exe/bsx.dat", make_story_showing(&lines, &[(0, 0), (1, 2)]));
+    let mut vfs = kintsugi_core::vfs::Vfs::new();
+    vfs.push(std::sync::Arc::new(source));
+    let mount = kintsugi_bsx::plugin()
+        .mount(&vfs)
+        .expect("the story mounts");
+    let script = mount
+        .read_script(&VirtualPath::new("exe/bsx.dat"))
+        .expect("the story reads");
+
+    assert_eq!(script.commands.len(), 4);
+    assert_eq!(
+        script.commands[0],
+        kintsugi_core::script::Command::Narration(String::from("shown first"))
+    );
+    assert_eq!(
+        script.commands[1],
+        kintsugi_core::script::Command::Dialogue {
+            speaker: None,
+            text: String::from("shown last"),
+        }
+    );
+    assert_eq!(
+        script.commands[2],
+        kintsugi_core::script::Command::RawLine(String::from("never shown"))
+    );
+    assert!(
+        script.warnings[0].contains("never shows"),
+        "{:?}",
+        script.warnings
+    );
+}
+
+/// One string in the file can be shown in two scenes. A translation that gives
+/// those two places different words cannot be honoured in both, and a seam that
+/// silently picked one would lose the other.
+#[test]
+fn one_line_shown_twice_cannot_be_translated_two_ways() {
+    let lines = ["the same words", "other words", "third", "fourth"];
+    let mut source = kintsugi_core::vfs::MemorySource::new();
+    source.insert(
+        "exe/bsx.dat",
+        make_story_showing(&lines, &[(0, 0), (1, 1), (0, 0)]),
+    );
+    let mut vfs = kintsugi_core::vfs::Vfs::new();
+    vfs.push(std::sync::Arc::new(source));
+    let mount = kintsugi_bsx::plugin()
+        .mount(&vfs)
+        .expect("the story mounts");
+    let path = VirtualPath::new("exe/bsx.dat");
+
+    // The same words at both places is a repair that can be honoured.
+    let agreed = std::collections::BTreeMap::from([
+        (0usize, String::from("同じ言葉")),
+        (2usize, String::from("同じ言葉")),
+    ]);
+    let written = mount
+        .write_script(&path, &agreed)
+        .expect("one line, one text, one repair");
+    let reread = kintsugi_bsx::Story::parse(&written.script).expect("a repair is a story");
+    assert_eq!(reread.strings()[0], "同じ言葉");
+    assert_eq!(written.replaced, 1);
+
+    // Two readings of the same string is a question, not a repair.
+    let clashing = std::collections::BTreeMap::from([
+        (0usize, String::from("一つ目")),
+        (2usize, String::from("二つ目")),
+    ]);
+    let error = match mount.write_script(&path, &clashing) {
+        Ok(_) => panic!("two readings of one line cannot both be written"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("shown more than once"), "{message}");
+    assert!(message.contains("line 0"), "{message}");
+}
+
 #[test]
 fn a_folder_of_strangers_is_not_mounted() {
     let mut source = kintsugi_core::vfs::MemorySource::new();
@@ -152,14 +245,30 @@ fn a_story_beside_no_archive_is_the_script_the_game_is_played_through() {
     assert_eq!(path.as_str(), "exe/bsx.dat");
     let script = mount.read_script(&path).expect("the story reads");
     assert_eq!(script.commands.len(), 6);
+    // The code says what each line is shown as. The fixture cycles its three
+    // channels over its six lines, so the first is narration and the sixth is
+    // dialogue — typed text, where this seam used to hand over six raw lines.
+    assert_eq!(
+        script.commands[0],
+        kintsugi_core::script::Command::Narration(String::from("■■■　真理奈ＥＮＤ　■■■"))
+    );
     assert_eq!(
         script.commands[5],
-        kintsugi_core::script::Command::RawLine(String::from("見に行かない"))
+        kintsugi_core::script::Command::Dialogue {
+            speaker: None,
+            text: String::from("見に行かない"),
+        }
     );
-    // The seam says what it does not know, in the script it hands over.
+    // The seam says what it does not know, in the script it hands over: the
+    // channel is not a character, and a branch is not decoded.
     assert_eq!(script.warnings.len(), 1);
     assert!(
-        script.warnings[0].contains("flat table"),
+        script.warnings[0].contains("order the code shows them"),
+        "{:?}",
+        script.warnings
+    );
+    assert!(
+        script.warnings[0].contains("not one playthrough"),
         "{:?}",
         script.warnings
     );

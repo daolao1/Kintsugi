@@ -25,16 +25,24 @@
 //!
 //! Detection, mounting (loose files plus every archive, read through byte
 //! ranges), image decoding, and the story: `bsx.dat` is read into the body's IR
-//! one line per command, translated, and written back with only the lines a
-//! translation names changed. Verified on a real 2008 release: 11,864 lines,
-//! extracted, mock-translated and repaired in 0.55 s, with the bytecode and the
-//! name tables byte-identical afterwards.
+//! in the order the code shows it, translated, and written back with only the
+//! lines a translation names changed. Verified on a real 2008 release: 11,986
+//! `show` instructions turned into 11,864 narration and dialogue commands,
+//! mock-translated and repaired in about a second, with the code, the header and
+//! the name tables byte-identical afterwards.
 //!
-//! What it does **not** do is say which line is dialogue and which is a menu
-//! label: that is decided by the compiled bytecode, which this seam does not
-//! read yet, so every line arrives as [`kintsugi_core::script::Command::RawLine`]
-//! with a warning that says so. A seam that guessed would put plausible words
-//! into a game without knowing what they replace.
+//! The classification comes from the instructions themselves: `1a <channel>
+//! <line:u32>`, where the channel is the text box the game draws. On the
+//! release this was written against the channels are three, they cover 99.8% of
+//! the lines, and their channel 0 text is narration while 1 and 2 are spoken —
+//! that is what the lines say, not what the numbers were assumed to mean.
+//!
+//! What it does **not** do is read the branch instructions, so
+//! [`kintsugi_core::script::Command::Choice`] is never produced: the runs of
+//! consecutive lines are walked one after the other, which is every line the
+//! story can reach rather than one playthrough, and the seam says so in a
+//! warning on every script it hands over. A line the code never shows is kept as
+//! [`kintsugi_core::script::Command::RawLine`] rather than dropped.
 
 pub mod bsarc;
 pub mod fixtures;
@@ -43,7 +51,7 @@ pub mod plugin;
 pub mod script;
 
 pub use plugin::{ENGINE_ID, plugin};
-pub use script::{SCRIPT_MAGIC, Story};
+pub use script::{SCRIPT_MAGIC, Show, Story};
 
 use kintsugi_core::error::{Error, Result};
 
