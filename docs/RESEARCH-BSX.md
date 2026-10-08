@@ -73,6 +73,17 @@ Two notes where the real file and the prior art differ, both worth keeping:
   whose records have no slashes in them at all. A reader that treated a marker
   as a file would list 4,405 files where the game has 4,377 and would put 28
   entries with no bytes and no meaning in front of a user.
+* Those 28 markers are the whole of the difference between the records an
+  archive declares and the files it holds, archive by archive: `Graphics.bsa`
+  144 − 4 = 140, `GraphicsBU.bsa` 516 − 14 = 502, `GraphicsEv.bsa` 291 − 0 =
+  291, `Voice.bsa` 3,410 − 10 = 3,400, `bgm.bsa` and `se.bsa` unchanged — 4,377
+  files. Every marker is a record with offset 0 and size 0, so a reader can also
+  recognise one without knowing the convention.
+* Records may **share bytes**: the extents in `GraphicsBU.bsa` declare
+  168,369,600 bytes and cover 167,930,792, so 438,824 bytes are named more than
+  once, the same picture under several names. Anything that walks an archive to
+  transform it — upscaling every image, say — has to decide what to do about
+  that, and "once per name" and "once per byte range" are different answers.
 
 **Implemented:** reading, mounting (under a prefix taken from the archive's
 name, so two archives holding `b01a.bsg` cannot shadow each other), and byte
@@ -110,15 +121,65 @@ Colour-mode and compression distribution over all 765 images of the release:
 | 1 (BGR) | 1 (run length) | 14 |
 | 2 (indexed) | 1 (run length) | 4 |
 
+Of the 765 images, **456 are `BSS-Composition`** — a second header at `+0x20`
+composing a picture from parts at `±x`/`±y` offsets — and 309 are plain. The
+168 BMPs are the only other image files. Together with the 3,444 Ogg files that
+is 4,377, which is exactly the number of files the mount reports, so no file in
+these archives is unaccounted for.
+
 **Implemented:** colour modes 0, 1, 2 with compression 0 and 1. Every declared
 `unpacked size` in the release equals `width × height × 4` (or `× 1` for indexed),
 and the decoder refuses a file where it does not.
+
+Checked rather than assumed, one representative file per kind — the smallest of
+each colour mode, a composition, and one of the BMPs — carried all the way
+through `upscale` on the release itself:
+
+| colour mode | file | decoded as |
+| --- | --- | --- |
+| 0 | `graphics/system/msg_info_str1.bsg` | 48×126 |
+| 0 | `graphics/system/dm_slot.bsg` | 192×304 |
+| 0 | `graphics/system/spray_anime.bsg` | 200×1200 |
+| 1 | `graphics/system/logo.bsg` | 800×600 |
+| 1 | `graphics/system/scene0_thumb.bsg` | 120×1800 |
+| 1 | `graphics/system/scene1_thumb.bsg` | 120×1620 |
+| 2 | `graphics/system/item0_foot.bsg` | 624×64 |
+| 2 | `graphics/system/message_hit.bsg` | 800×150 |
+| 2 | `graphics/system/title_hit.bsg` | 800×600 |
+| 0, composition | `graphics/system/log_vp.bsg` | 39×36 |
+| — (BMP) | `graphicsbu/12/bu12f0031a01m.bmp` | 66×120 |
+
+All three colour modes, both container kinds and the BMPs are in that table
+because all of them decoded; every one was carried through `upscale --factor 2`
+on the release itself. Compression 0 does not appear in it because **this
+release has none**: all 765 images declare compression 1, so the stored path is
+implemented and exercised by fixtures only, and nothing in this release would
+notice if it were wrong. That is worth knowing before trusting it.
+
+That table is also where the next gap shows: `scene0_thumb` at 120×1800 divides
+evenly into ten strips of 120×180, and `spray_anime` at 200×1200 into six of
+200×200 — **strips of frames**. The body's `Image` has no notion of frames: one
+file is one picture. So `upscale` works on them and `interpolate` cannot, which
+is a body API question rather than a format one. Recorded here because "the
+release has animations" and "this seam can interpolate them" are not the same
+sentence.
 
 The run-length layout was checked against **all 765** images of the release, and
 not by eye: for every one of them, all of its planes' streams ended at exactly
 `data offset + data size` — no byte left over, none missing — and each stream
 wrote exactly `width × height` bytes. A layout half-understood would not survive
 that on a single file, let alone on 765.
+
+### Upscaling a real picture
+
+`cg046.bsg` — a 1.5 MB composition, 800×600 — taken to 1600×1200 twice, once
+with `--method anime4k` and once with `--method bilinear`, both out of the
+192 MB archive on the ISO, in about two seconds each. The mean absolute
+difference between neighbouring pixels (luminance, one sample in four rows and
+sixteen columns) is **4.29 for anime4k against 2.98 for bilinear**: an
+edge-directed method should leave a harder edge where the art has one, and on
+real art it does. That is the whole claim the preset makes, measured rather
+than asserted — and it is measured on this release, not on a fixture.
 
 ### A dead end worth recording
 
