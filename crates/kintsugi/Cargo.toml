@@ -18,3 +18,8 @@ kintsugi-bluegale.workspace = true
 kintsugi-bsx.workspace = true
 kintsugi-video.workspace = true
 kintsugi-translate.workspace = true
+
+[dev-dependencies]
+# The disc-image fixture: `tests/cli.rs` builds a game that only exists as an
+# `.iso`, and the builders shared by the seams' tests live in this crate.
+kintsugi-testkit.workspace = true

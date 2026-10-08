@@ -277,6 +277,7 @@ dependencies = [
  "kintsugi-bluegale",
  "kintsugi-bsx",
  "kintsugi-core",
+ "kintsugi-testkit",
  "kintsugi-translate",
  "kintsugi-video",
 ]

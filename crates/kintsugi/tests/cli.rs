@@ -1327,3 +1327,131 @@ fn a_story_is_translated_and_the_repair_never_touches_the_game() {
         "nothing in the game folder is written to"
     );
 }
+
+/// A game that only exists as a disc image inside a folder.
+///
+/// This is the path that was broken until recently, and it is the one no other
+/// test covers: the folder holding the image is the game, the image is mounted
+/// *under* it, and a loose file in the folder shadows the image's own copy of
+/// the same name. That shadowing is the whole repair — nothing is ever written
+/// into a disc, so the repair has to land beside it and win.
+#[test]
+fn a_folder_holding_a_disc_image_is_repaired_and_played() {
+    let temp = TempDir::new("disc-image");
+    let game = temp.0.join("game");
+    fs::create_dir_all(&game).unwrap();
+
+    // The disc, built byte by byte: the story, a picture inside a BSArc
+    // archive (an archive plus a story is what makes this engine certain rather
+    // than a guess), and a loose picture beside it.
+    let story = kintsugi_bsx::fixtures::make_bsx_dat();
+    let room = kintsugi_bsx::fixtures::make_bsg(
+        2,
+        2,
+        &[
+            [200, 40, 40, 255],
+            [40, 200, 40, 255],
+            [40, 40, 200, 255],
+            [240, 240, 240, 255],
+        ],
+    );
+    let archive = kintsugi_bsx::fixtures::make_bsarc(&[("room.bsg", &room)]);
+    let title = kintsugi_bsx::fixtures::make_bsg(1, 1, &[[10, 20, 30, 255]]);
+    let image = kintsugi_testkit::make_iso(&[
+        ("exe/bsx.dat", &story),
+        ("exe/Graphics.bsa", &archive),
+        ("exe/title.bsg", &title),
+    ]);
+    let iso = game.join("ONI.ISO");
+    fs::write(&iso, &image).unwrap();
+    assert_eq!(
+        listing(&game),
+        vec!["ONI.ISO".to_string()],
+        "this test is about a folder that holds one disc image and nothing else"
+    );
+
+    // A patch from the game as it is handed over: the story is read out of the
+    // image, so this only works if the folder mounts the image at all.
+    let patch = temp.0.join("bsx.en.dat");
+    let translated = run(&[
+        "translate",
+        game.to_str().unwrap(),
+        "--mock",
+        "--no-play",
+        "--write-script",
+        patch.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        translated.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(&translated),
+        stderr(&translated)
+    );
+    assert!(patch.is_file(), "the patch itself must have been written");
+
+    let copy = temp.0.join("repaired");
+    let installed = run(&[
+        "install",
+        game.to_str().unwrap(),
+        "--script",
+        patch.to_str().unwrap(),
+        "--into",
+        copy.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        installed.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(&installed),
+        stderr(&installed)
+    );
+
+    // The repair lands beside the image, at the path the seam named, and the
+    // copy of the image it shadows is the original byte for byte: a repair that
+    // had been written into the disc would show up here.
+    let repaired = copy.join("exe").join("bsx.dat");
+    assert!(
+        repaired.is_file(),
+        "the repair must land beside the image, at exe/bsx.dat"
+    );
+    assert_eq!(
+        fs::read(&repaired).unwrap(),
+        fs::read(&patch).unwrap(),
+        "the loose file is not the repair that was installed"
+    );
+    assert_eq!(
+        fs::read(copy.join("ONI.ISO")).unwrap(),
+        image,
+        "the copy's image is not the image that was handed over"
+    );
+
+    // ...and the folder the user pointed at is untouched: same files, same
+    // bytes in the image.
+    assert_eq!(
+        listing(&game),
+        vec!["ONI.ISO".to_string()],
+        "install left something in the original game folder"
+    );
+    assert_eq!(
+        fs::read(&iso).unwrap(),
+        image,
+        "install modified the original disc image"
+    );
+
+    // What plays is the translation, and the image it came from is unchanged —
+    // so the loose file really does shadow the story inside the disc.
+    let played = run(&["play", copy.to_str().unwrap(), "--auto"]);
+    assert_eq!(
+        played.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(&played),
+        stderr(&played)
+    );
+    assert!(
+        stdout(&played).contains("mock: "),
+        "the copy plays the words inside the image instead of the repair beside it: {}",
+        stdout(&played)
+    );
+}

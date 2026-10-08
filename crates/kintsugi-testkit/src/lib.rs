@@ -33,6 +33,11 @@ use kintsugi_core::detect::Confidence;
 use kintsugi_core::plugin::EnginePlugin;
 use kintsugi_core::vfs::{MemorySource, Vfs};
 
+// The disc-image fixture: a game handed over as an `.iso` needs a real volume
+// to mount, and the repository holds no game data, so it is written in code.
+mod iso;
+pub use iso::make_iso;
+
 /// One example of the format this seam exists for, built in memory.
 ///
 /// The fixture is deliberately not a directory: it travels with the seam's
