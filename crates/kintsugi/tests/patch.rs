@@ -100,10 +100,10 @@ fn a_translated_script_writes_back_as_a_playable_patch() {
     assert!(written.unmatched.is_empty());
 
     // Still a BDT: the XOR container and the CP932 text were both rebuilt.
-    assert!(kintsugi_bluegale::bdt::looks_like_bdt(&written.data));
+    assert!(kintsugi_bluegale::bdt::looks_like_bdt(&written.script));
 
     // Read the patch back the way a player would: as a game script.
-    let patched = kintsugi_bluegale::bdt::parse_bdt("story.en.bdt", &written.data).unwrap();
+    let patched = kintsugi_bluegale::bdt::parse_bdt("story.en.bdt", &written.script).unwrap();
     assert_eq!(patched.commands.len(), script.commands.len());
     assert!(
         patched.commands.iter().any(
@@ -148,7 +148,7 @@ fn a_patch_changes_only_the_lines_it_translates() {
 
     // Every other command is byte-identical in meaning: same labels, same
     // original text, and the same number of commands.
-    let patched = kintsugi_bluegale::bdt::parse_bdt("story.bdt", &written.data).unwrap();
+    let patched = kintsugi_bluegale::bdt::parse_bdt("story.bdt", &written.script).unwrap();
     assert_eq!(patched.commands.len(), script.commands.len());
     for (before, after) in script.commands.iter().zip(&patched.commands) {
         match (before, after) {

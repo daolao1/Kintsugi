@@ -91,10 +91,47 @@ every seam runs in its own test suite (BlueGale's is
 `crates/kintsugi-bluegale/tests/conformance.rs`). It checks that a name is
 never evidence, that a `Certain` verdict can actually be mounted, that a seam
 names itself in every verdict and mount, that an empty folder is nobody's game,
-and that `write_script` with no replacements returns the file byte-for-byte.
-The checker has its own tests against eight deliberately broken seams, so the
-rules are enforced rather than asserted. Adding engine №2 starts at
+and that `write_script` with no replacements returns every file it claims to
+change byte-for-byte, including the script's own bytes. The checker has its own
+tests against eight deliberately broken seams, so the rules are enforced rather
+than asserted. Adding engine №2 starts at
 [docs/ADDING-AN-ENGINE.md](docs/ADDING-AN-ENGINE.md).
+
+### A packed script is two files, and the newer layer stays on top
+
+`write_script` answers with two different things, because two callers want
+different things and conflating them is how a tool writes a file nobody asked
+for:
+
+| field | what it is | who wants it |
+| --- | --- | --- |
+| `script` | the script's own new bytes — exactly what a patch file holds | `translate --write-script`, and the seam's own parser reading it back |
+| `files` | the files in the game folder that must carry those bytes, with their new contents | `install` |
+
+For a loose script the two are the same single file. For a script packed inside
+an archive they are not: BlueGale's `story.bdt` lives in `game.snn`, whose
+`game.inx` index records where each entry starts and how long it is, so the
+repair is **the blob and the index**. The seam returns both, and the host writes
+exactly what it is handed — it never decides for itself that a repair means one
+file, which is what would have produced a loose `story.bdt` beside an archive
+that shadows it: a copy that looks repaired and plays the original words.
+
+An archive is rewritten in place, not repacked. A replacement that fits in the
+space its entry already has is written there, so no other byte in the blob
+moves; one that does not fit is appended and the index is pointed at it, leaving
+the old bytes as dead space. Repacking would move resources that have nothing to
+do with the repair, and a resource that does not move is a resource this tool
+cannot have broken. Two entries whose byte ranges overlap are refused outright:
+rewriting one would change the other, and guessing which resource those bytes
+belong to is not this tool's job.
+
+Source order is part of the contract too. A mount preserves the order of the
+sources it was given and inserts an archive **directly in front of the source it
+was found in** — an archive shadows the loose files beside it, and nothing else.
+Pushing archives to the very front instead means a game's own archive shadows
+the layer a caller mounted above it, which is exactly how `install` would read
+its own patch back as the original script and report success while changing
+nothing.
 
 ### Detection: an extension is never evidence
 
@@ -163,7 +200,8 @@ The philosophy is not a slogan; it is enforced in four places.
 ### 1. Originals are never written
 
 Seams take `&Vfs`, which is read-only by construction. No seam contains a write
-at all: `EngineMount::write_script` returns `WrittenScript` bytes and never
+at all: `EngineMount::write_script` returns `WrittenScript` — the script's own
+new bytes, plus every file in the game folder that has to carry them — and never
 touches a disk. Every write in the workspace is (a) a host writing a path the
 user named — `crates/kintsugi/src/main.rs` for `-o out.png`, `--write-script`,
 `--jsonl-dir`, the copy `install --into` builds, and
@@ -304,8 +342,8 @@ extract_with_raw       → Vec<TranslationEntry>  (id = command index)
 Translator backend     → Vec<TranslationEntry>  (ids echoed back; extra ids dropped)
    → report            (batches, changed, unchanged, hallucinated ids)
 apply                  → Script copy, originals untouched
-mount.write_script     → WrittenScript { data, replaced, unmatched }
-host writes out.bdt    → byte-preserving patch, CP932-strict
+mount.write_script     → WrittenScript { script, files, replaced, unmatched }
+host writes out.bdt    → byte-preserving patch, CP932-strict (the `script` bytes)
 ```
 
 **`kintsugi upscale GAME --asset title.bbm --method anime4k --factor 4`**

@@ -566,22 +566,40 @@ mod install {
 
     /// A script served from an archive cannot be repaired by writing a file
     /// beside it: the archive shadows loose files, so the copy would look
-    /// repaired and play the original words.
+    /// A game whose script lives inside its archive: the repair goes back into
+    /// the archive, which means two files change — the blob and the index that
+    /// points into it — and the copy plays the translation.
     #[test]
-    fn a_script_that_lives_in_an_archive_is_refused() {
+    fn a_script_inside_an_archive_is_repaired_in_the_archive() {
         let temp = TempDir::new("install-archived");
         let game = temp.0.join("game");
         fs::create_dir_all(&game).unwrap();
-        // A game whose only script is inside the archive: `game.inx` + `game.snn`
-        // hold STORY.BDT, and there is no `story.bdt` file on disk.
+        // No `story.bdt` on disk: STORY.BDT exists only inside game.snn.
         let script = kintsugi_bluegale::fixtures::make_bdt("$start\r\nこんにちは。\r\n%fin\r\n");
         let (snn, placements) = kintsugi_bluegale::fixtures::make_snn(&[&script]);
         let (offset, size) = placements[0];
         let inx = kintsugi_bluegale::fixtures::make_inx(&[("STORY.BDT", offset, size)]);
         fs::write(game.join("game.inx"), &inx).unwrap();
         fs::write(game.join("game.snn"), &snn).unwrap();
+        // A patch with one line translated, which is what `translate
+        // --write-script` produces: the script's own bytes, one line changed.
+        let parsed = kintsugi_bluegale::bdt::parse_bdt("story.bdt", &script).unwrap();
+        let id = parsed
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, kintsugi_core::script::Command::RawLine(t) if t == "こんにちは。"),
+            )
+            .expect("the fixture has a narration line");
+        let patch_bytes = kintsugi_bluegale::bdt::rewrite_bdt(
+            &script,
+            &std::collections::BTreeMap::from([(id, "mock: hello".to_string())]),
+        )
+        .unwrap()
+        .data;
         let patch = temp.0.join("patch.bdt");
-        fs::write(&patch, &script).unwrap();
+        fs::write(&patch, &patch_bytes).unwrap();
+        let copy = temp.0.join("repaired");
 
         let output = run(&[
             "install",
@@ -589,20 +607,47 @@ mod install {
             "--script",
             patch.to_str().unwrap(),
             "--into",
-            temp.0.join("repaired").to_str().unwrap(),
+            copy.to_str().unwrap(),
         ]);
-
         assert_eq!(
             output.status.code(),
-            Some(1),
+            Some(0),
             "stdout: {}\nstderr: {}",
             stdout(&output),
             stderr(&output)
         );
         assert!(
-            stderr(&output).contains("served from an archive"),
-            "stderr: {}",
-            stderr(&output)
+            stdout(&output).contains("installed story.bdt into the copy"),
+            "stdout: {}",
+            stdout(&output)
+        );
+
+        // The archive changed, the loose file was not invented, and the original
+        // folder is byte-for-byte what it was.
+        assert!(!copy.join("story.bdt").exists());
+        assert_ne!(fs::read(copy.join("game.snn")).unwrap(), snn);
+        assert_ne!(fs::read(copy.join("game.inx")).unwrap(), inx);
+        assert_eq!(fs::read(game.join("game.snn")).unwrap(), snn);
+        assert_eq!(fs::read(game.join("game.inx")).unwrap(), inx);
+
+        // And the copy plays the translated script, read back through the seam:
+        // the archive had to round-trip through its own parser for that to work.
+        let mut vfs = kintsugi_core::vfs::Vfs::new();
+        vfs.push(std::sync::Arc::new(
+            kintsugi_core::vfs::DirectorySource::new(&copy),
+        ));
+        let mount = kintsugi_core::plugin::EnginePlugin::mount(&kintsugi_bluegale::plugin(), &vfs)
+            .expect("the repaired copy must mount");
+        let script_path = kintsugi_core::vfs::VirtualPath::new("story.bdt");
+        let repaired = mount
+            .read_script(&script_path)
+            .expect("the repaired script must be readable");
+        assert!(
+            repaired.commands.iter().any(
+                |c| matches!(c, kintsugi_core::script::Command::RawLine(t) if t == "mock: hello")
+            ),
+            "the copy does not play the translation: {:?}",
+            repaired.commands
         );
     }
 
@@ -726,6 +771,45 @@ mod install {
             fs::read(copy.join("story.bdt")).unwrap(),
             edited,
             "a refused install rewrote the file anyway"
+        );
+    }
+
+    /// A patch that changes nothing is refused rather than installed: a copy
+    /// that is byte-for-byte the original, reported as a repaired one, is the
+    /// most expensive kind of quiet lie.
+    #[test]
+    fn a_patch_that_changes_nothing_is_refused() {
+        let temp = TempDir::new("install-noop");
+        let (game, _translated) = game_and_patch(&temp, "noop");
+        // The patch is the game's own script, so every line "matches".
+        let same = temp.0.join("same.bdt");
+        fs::copy(game.join("story.bdt"), &same).unwrap();
+        let copy = temp.0.join("repaired");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            same.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("would change nothing"),
+            "stderr: {}",
+            stderr(&output)
+        );
+        assert!(
+            !copy.exists(),
+            "a refused install must not leave a copy: {}",
+            copy.display()
         );
     }
 

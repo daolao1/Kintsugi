@@ -131,17 +131,91 @@ pub trait EngineMount: Send {
     }
 }
 
-/// A repaired script, ready to be saved next to the original.
+/// One file a repair changed, and the bytes to write into it.
+///
+/// It is a *list* of these rather than a single blob because a script is not
+/// always a file. BlueGale keeps `.bdt` scripts both loose and inside its SNN
+/// archives, and a script packed in an archive cannot be repaired by writing a
+/// `.bdt`: the bytes live in the blob, and the INX index that points at them
+/// has to be rewritten with its new offset and size. A seam that pretends
+/// otherwise would either refuse every packed script or write a file the game
+/// never reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenFile {
+    /// Where to write, as a path inside the game folder — the script itself for
+    /// a loose script, the archive and its index for a packed one.
+    pub path: VirtualPath,
+    /// The complete new contents of that file.
+    pub data: Vec<u8>,
+}
+
+/// A repaired script: the script's own new bytes, the files a game folder needs
+/// changed, and what happened on the way.
+///
+/// Two answers rather than one, because the two callers want different things
+/// and conflating them is how a tool writes a file nobody asked for. `translate
+/// --write-script` wants a *patch*: the translated script as a file the seam can
+/// parse again, which is `script`. `install` wants the *repair*: whatever files
+/// in the copy have to change for the game to play the translation, which is
+/// `files` — one file for a loose script, and for a script packed in an archive
+/// the blob and the index that points into it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WrittenScript {
-    /// The bytes to write. The caller chooses the path; seams never write.
-    pub data: Vec<u8>,
+    /// The script's own new bytes: exactly what a patch file holds, whether or
+    /// not the script lives in a file of its own.
+    pub script: Vec<u8>,
+    /// Every file the repair changes, with its new bytes. Never empty: a repair
+    /// that changed nothing is a refusal, not an empty success. The caller
+    /// chooses where to put them; seams never write.
+    pub files: Vec<WrittenFile>,
     /// How many of the requested replacements were applied.
     pub replaced: usize,
     /// Command indices the original file does not have — ids drift when the
     /// script and the translation come from different versions, and a silent
     /// mismatch here is how a patch lands on the wrong line.
     pub unmatched: Vec<usize>,
+}
+
+impl WrittenScript {
+    /// The common case: a script that is a file of its own, so the repair is
+    /// one file and the script's bytes are that file's bytes.
+    pub fn loose(
+        path: VirtualPath,
+        script: Vec<u8>,
+        replaced: usize,
+        unmatched: Vec<usize>,
+    ) -> Self {
+        Self {
+            files: vec![WrittenFile {
+                path,
+                data: script.clone(),
+            }],
+            script,
+            replaced,
+            unmatched,
+        }
+    }
+
+    /// A script packed inside a container: its own bytes, and the files the
+    /// game folder needs changed to carry them.
+    pub fn packed(
+        script: Vec<u8>,
+        files: Vec<WrittenFile>,
+        replaced: usize,
+        unmatched: Vec<usize>,
+    ) -> Self {
+        Self {
+            script,
+            files,
+            replaced,
+            unmatched,
+        }
+    }
+
+    /// The paths this repair writes, for a report.
+    pub fn paths(&self) -> impl Iterator<Item = &VirtualPath> {
+        self.files.iter().map(|file| &file.path)
+    }
 }
 
 /// One dead engine's golden seam.

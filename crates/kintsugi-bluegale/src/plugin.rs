@@ -6,7 +6,9 @@ use std::sync::Arc;
 use kintsugi_core::asset::{Audio, Image};
 use kintsugi_core::detect::{Confidence, Detection};
 use kintsugi_core::error::{Error, Result};
-use kintsugi_core::plugin::{EngineMount, EnginePlugin, MountInfo, PluginMetadata, WrittenScript};
+use kintsugi_core::plugin::{
+    EngineMount, EnginePlugin, MountInfo, PluginMetadata, WrittenFile, WrittenScript,
+};
 use kintsugi_core::script::Script;
 use kintsugi_core::vfs::{Vfs, VirtualPath};
 
@@ -122,41 +124,73 @@ impl EnginePlugin for BluegalePlugin {
         let mut mounted = Vfs::new();
         let mut info = MountInfo::new(ENGINE_ID);
         let mut mount_count = 0usize;
+        let mut archives: Vec<MountedArchive> = Vec::new();
 
-        let mut inx_paths = vfs.find_by_extension(&["inx"]);
-        inx_paths.sort();
-        for inx_path in &inx_paths {
-            let inx_bytes = vfs
-                .read(inx_path)
-                .map_err(|e| Error::Plugin(format!("reading {}: {e}", inx_path)))?;
-            let entries = crate::snn::parse_inx(&inx_bytes)
-                .map_err(|e| Error::Plugin(format!("parsing {}: {e}", inx_path)))?;
-            let Some(snn_path) = sibling_with_extension(inx_path, "snn") else {
-                info.note(format!(
-                    "skipping '{}': no sibling .snn file",
-                    inx_path.file_name()
-                ));
-                continue;
-            };
-            let snn_bytes = match vfs.read(&snn_path) {
-                Ok(bytes) => bytes,
-                Err(e) => {
+        // The caller's source order is preserved, and each archive is inserted
+        // **directly in front of the source it was found in** — an archive
+        // shadows the loose files beside it, and nothing else.
+        //
+        // Pushing every archive to the very front instead is the bug this
+        // replaced: `install` overlays the patch by putting a source in front of
+        // the game, and a game whose script is packed would have had its own
+        // archive shadow that overlay, so the patch was read back as the
+        // *original* script, no line differed, and the install reported success
+        // while changing nothing. A layer a caller mounted above the game has to
+        // stay above it.
+        for source in vfs.sources() {
+            for (inx_path, _) in source.list() {
+                if inx_path.extension() != Some("inx") {
+                    continue;
+                }
+                let inx_bytes = match source.read(&inx_path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        info.note(format!("skipping '{inx_path}': cannot read it: {e}"));
+                        continue;
+                    }
+                };
+                let entries = match crate::snn::parse_inx(&inx_bytes) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        info.note(format!("skipping '{inx_path}': {e}"));
+                        continue;
+                    }
+                };
+                let Some(snn_path) = sibling_with_extension(&inx_path, "snn") else {
                     info.note(format!(
-                        "skipping '{}': cannot read {snn_path}: {e}",
+                        "skipping '{}': no sibling .snn file",
                         inx_path.file_name()
                     ));
                     continue;
-                }
-            };
-            let archive = SnnArchive::open(&inx_bytes, snn_bytes, snn_path.as_str())
-                .map_err(|e| Error::Plugin(format!("mounting {}: {e}", inx_path)))?;
-            info.note(format!(
-                "mounted '{}': {} entries",
-                snn_path.file_name(),
-                entries.len()
-            ));
-            mounted.push_front(Arc::new(SnnSource::new(Arc::new(archive))));
-            mount_count += 1;
+                };
+                let snn_bytes = match source.read(&snn_path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        info.note(format!(
+                            "skipping '{}': cannot read {snn_path} beside it: {e}",
+                            inx_path.file_name()
+                        ));
+                        continue;
+                    }
+                };
+                let archive = SnnArchive::open(&inx_bytes, snn_bytes, snn_path.as_str())
+                    .map_err(|e| Error::Plugin(format!("mounting {inx_path}: {e}")))?;
+                info.note(format!(
+                    "mounted '{}': {} entries",
+                    snn_path.file_name(),
+                    entries.len()
+                ));
+                let archive = Arc::new(archive);
+                mounted.push(Arc::new(SnnSource::new(archive.clone())));
+                archives.push(MountedArchive {
+                    inx: inx_path.clone(),
+                    snn: snn_path,
+                    archive,
+                });
+                mount_count += 1;
+            }
+            // Behind its own archive, in front of the sources that came after.
+            mounted.push(source.clone());
         }
 
         if mount_count == 0 && vfs.find_by_extension(&["bdt", "zbm", "bbm"]).is_empty() {
@@ -166,13 +200,11 @@ impl EnginePlugin for BluegalePlugin {
             ));
         }
 
-        // Archives shadow loose files; the original tree stays reachable
-        // underneath, for scripts and anything not packed.
-        for source in vfs.sources() {
-            mounted.push(source.clone());
-        }
-
-        Ok(Box::new(BluegaleMount { info, vfs: mounted }))
+        Ok(Box::new(BluegaleMount {
+            info,
+            vfs: mounted,
+            archives,
+        }))
     }
 }
 
@@ -195,9 +227,37 @@ fn parent_of(path: &VirtualPath) -> String {
 }
 
 /// The playable view of a mounted BlueGale game.
+/// One archive this mount serves, with the names of the two files it is.
+///
+/// Kept so that a script packed inside an archive can be written back where it
+/// came from: the bytes go into the blob and the index that points at them is
+/// rewritten with them, which is a repair of *two* files rather than one.
+struct MountedArchive {
+    inx: VirtualPath,
+    snn: VirtualPath,
+    archive: Arc<SnnArchive>,
+}
+
 pub struct BluegaleMount {
     info: MountInfo,
     vfs: Vfs,
+    /// In mount order; the last one is the front-most source, so a lookup walks
+    /// this backwards to find the archive the mounted view would read from.
+    archives: Vec<MountedArchive>,
+}
+
+impl BluegaleMount {
+    /// The archive that serves `path`, if the mounted view gets it from one.
+    ///
+    /// Walks backwards because archives are pushed to the front of the mounted
+    /// view as they are opened: the last one opened is the one a read of a name
+    /// they share actually reaches.
+    fn archive_holding(&self, path: &VirtualPath) -> Option<&MountedArchive> {
+        self.archives
+            .iter()
+            .rev()
+            .find(|host| host.archive.find(path.as_str()).is_some())
+    }
 }
 
 impl EngineMount for BluegaleMount {
@@ -252,6 +312,44 @@ impl EngineMount for BluegaleMount {
         replacements: &BTreeMap<usize, String>,
     ) -> Result<WrittenScript> {
         let bytes = self.vfs.read(path)?;
-        bdt::rewrite_bdt(&bytes, replacements)
+        let rewritten = bdt::rewrite_bdt(&bytes, replacements)?;
+
+        // The script may be a file of its own, or an entry inside an archive.
+        // Which one decides what gets written: a loose script is one file, a
+        // packed one is the blob plus the index that points into it.
+        if let Some(host) = self.archive_holding(path) {
+            let index = host.archive.find(path.as_str()).ok_or_else(|| {
+                Error::Plugin(format!(
+                    "'{path}' is served by '{}' but the archive cannot find it by name",
+                    host.snn
+                ))
+            })?;
+            let mut replacement = BTreeMap::new();
+            let script = rewritten.data;
+            replacement.insert(index, script.clone());
+            let (snn, inx) = host.archive.rebuilt(&replacement)?;
+            return Ok(WrittenScript::packed(
+                script,
+                vec![
+                    WrittenFile {
+                        path: host.snn.clone(),
+                        data: snn,
+                    },
+                    WrittenFile {
+                        path: host.inx.clone(),
+                        data: inx,
+                    },
+                ],
+                rewritten.replaced,
+                rewritten.unmatched,
+            ));
+        }
+
+        Ok(WrittenScript::loose(
+            path.clone(),
+            rewritten.data,
+            rewritten.replaced,
+            rewritten.unmatched,
+        ))
     }
 }

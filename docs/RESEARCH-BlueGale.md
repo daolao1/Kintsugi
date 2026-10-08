@@ -169,6 +169,34 @@ refused as a structural change; ids with no home in the original come back as
 `crates/kintsugi/tests/patch.rs` cover it; no real `.bdt` has been round-tripped
 yet, so byte-identity is proven only against our fixtures (§8.3).
 
+**Writing back into the archive.** When STORY.BDT exists only as an entry in
+`game.snn`, a loose `story.bdt` written beside it would be shadowed by the
+archive and play the original words, so the repair has to go *into* the
+container. `SnnArchive::rebuilt` returns the pair `(snn bytes, inx bytes)`: an
+entry whose new bytes fit in its recorded `size` is written at its recorded
+`offset` and nothing else in the blob moves, and one that does not fit is
+appended with the index repointed at it, leaving the old bytes as dead space. No
+repacking: moving entries that have nothing to do with the repair would put the
+rest of the archive at risk for no gain. Names come back exactly as parsed —
+except for the one entry that changed, which is matched by name — because CP932
+has ~396 characters with two or three valid encodings (`87 90` and `81 E0` are
+both `≒`), so re-encoding a name is a way to change a file nobody asked to
+change. Two entries whose byte ranges overlap are refused: rewriting one would
+change the other. With no replacements both files come back byte-identical
+(including gaps, trailing bytes and anything after the index records), which is
+what `write_script`'s rule 5 checks — four tests in `snn.rs`, and
+`crates/kintsugi/tests/cli.rs` installs a translated script into a packed
+archive and reads it back through the seam.
+
+The mount also had to stop pushing archives to the very front of its view.
+`install` reads its patch by overlaying a source on top of the game, and an
+archive at the front shadowed that overlay: the patch was read back as the
+original script, no line differed, and the install reported success while
+changing nothing. Archives are now inserted directly in front of the source they
+were found in, so an archive shadows the loose files beside it and nothing else.
+`install` also refuses a patch in which no line differs, since a copy that is
+byte-for-byte the original is not a repair.
+
 **`indexwww.dat`.** The extractor can export the engine's label index: exactly
 `0xFA0` (4000) records of 16 bytes, `struct.pack('<8sII', name, offset,
 length)`, unused slots being 16 zero bytes. `name` is truncated to 8 bytes;

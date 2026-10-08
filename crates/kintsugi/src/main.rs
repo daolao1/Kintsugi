@@ -300,26 +300,17 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     let (_, original_mount) = registry.mount_best(&original_vfs)?;
     let target = pick_script(original_mount.as_ref(), args.flag("as"))?;
 
-    // A script the VFS serves from an archive is not a file in the game folder,
-    // and repairing it means rebuilding that archive, which no seam can do yet.
-    // Writing a loose file beside it would be worse than refusing: the archive
-    // shadows loose files, so the copy would look repaired and play the old
-    // words. Asking the filesystem — not the shape of the name — is what tells
-    // the two cases apart, since an archive entry is a flat lowercase name.
-    let target_path = Path::new(dir).join(target.as_str());
-    if !target_path.is_file() {
-        return Err(Failure::Engine(Error::unsupported(
-            "install",
-            format!(
-                "'{target}' is not a file in the game folder, so it is served from an \
-                 archive. Repairing it there means rebuilding that archive, which this \
-                 seam cannot do yet, and a loose file written beside it would be shadowed \
-                 by the archive: a copy that looks repaired and plays the original words"
-            ),
-        )));
-    }
-
+    // The script may be a file in the game folder or an entry inside one of its
+    // archives, and both are repairable: a seam that serves a script says which
+    // files the repair changes. What must never happen is writing a loose copy
+    // of a packed script — the archive shadows loose files, so the copy would
+    // look repaired and play the original words.
     let original = original_mount.read_script(&target)?;
+    let original_bytes = original_mount.vfs().read(&target).map_err(|e| {
+        Error::Plugin(format!(
+            "'{target}' was chosen as the script but cannot be read back: {e}"
+        ))
+    })?;
     let patch_bytes = std::fs::read(&patch_path)
         .map_err(|e| Error::Io(format!("reading the patch {}: {e}", patch_path.display())))?;
 
@@ -359,6 +350,22 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
             (None, None) => {}
         }
     }
+
+    // A patch with nothing to change is not a repair, and installing it would
+    // produce a copy that is byte-for-byte the original while reporting
+    // success. Refuse instead: the user asked for a repair and there is none,
+    // which usually means the patch was made from a different game or was
+    // already installed in it.
+    if replacements.is_empty() {
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "the patch has no line that differs from '{target}' in this game, so \
+                 installing it would change nothing. Either the patch was made from a \
+                 different game, or this game already has it"
+            ),
+        )));
+    }
     if !misfits.is_empty() {
         let shown = misfits
             .iter()
@@ -382,9 +389,10 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
     }
 
     // What the original looked like, so that "the original is untouched" can be
-    // a measurement rather than a sentence.
+    // a measurement rather than a sentence: the folder's contents, and the
+    // script's bytes read back through the mount — which for a packed script
+    // means re-parsing the archive, so this covers the container too.
     let originals_before = tree_names(Path::new(dir))?;
-    let target_bytes_before = std::fs::read(&target_path).ok();
 
     // Everything that writes happens inside this closure, and every line of
     // the report is printed after it returns. Two guarantees fall out:
@@ -432,9 +440,14 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
         let copy_vfs = open_game(&into.to_string_lossy())?;
         let (_, copy_mount) = registry.mount_best(&copy_vfs)?;
         let written = copy_mount.write_script(&target, &replacements)?;
-        let destination = into.join(target.as_str());
-        std::fs::write(&destination, &written.data)
-            .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
+        // Every file the repair changed, which is the script itself for a loose
+        // script and the archive plus its index for a packed one. The seam says
+        // which; the host writes them and nothing else.
+        for file in &written.files {
+            let destination = into.join(file.path.as_str());
+            std::fs::write(&destination, &file.data)
+                .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
+        }
 
         // Read it back: the copy is mounted again and the script parsed again,
         // so the report is about the file on disk and not about the bytes in
@@ -459,8 +472,10 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
         // The game it came from is byte-for-byte what it was. Nothing in this
         // command writes there, so this is a check on the tool itself.
         let originals_after = tree_names(Path::new(dir))?;
-        let target_bytes_after = std::fs::read(&target_path).ok();
-        if originals_before != originals_after || target_bytes_before != target_bytes_after {
+        let game_again = open_game(dir)?;
+        let (_, game_again_mount) = registry.mount_best(&game_again)?;
+        let bytes_after = game_again_mount.vfs().read(&target).ok();
+        if originals_before != originals_after || Some(&original_bytes) != bytes_after.as_ref() {
             return Err(Error::unsupported(
                 "install",
                 format!(
@@ -1721,13 +1736,17 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
         let written = mount.write_script(&script_path, &replacements)?;
         let path = PathBuf::from(out_path);
         ensure_outside_game(Path::new(dir), &path, "the repaired script")?;
-        std::fs::write(&path, &written.data)
+        // `written.script` rather than the files a game folder needs: this is a
+        // patch, and a patch is a script the seam can parse again — even when
+        // the script it came from is packed inside an archive, whose repair is
+        // two different files (`install` writes those).
+        std::fs::write(&path, &written.script)
             .map_err(|e| Error::Io(format!("writing {}: {e}", path.display())))?;
         println!(
             "{} {} ({} byte(s), {}/{} changed line(s))",
             gold("repaired script:"),
             path.display(),
-            written.data.len(),
+            written.script.len(),
             written.replaced,
             replacements.len()
         );

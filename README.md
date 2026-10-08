@@ -40,7 +40,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
 | **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
-| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, reading the copy back to prove it landed, recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf`, and removing a copy it made if the install does not finish — an install either finishes or leaves nothing | working |
+| **Install**: put a repaired script into a copy of the game — including a script packed inside an archive, which means rewriting the archive and its index — refusing a patch whose lines do not line up or change nothing, reading the copy back to prove it landed, recording what it wrote in `.kintsugi-install` so a re-install needs no manual `rm -rf`, and removing a copy it made if the install does not finish (an install either finishes or leaves nothing) | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam contract**: `kintsugi-testkit` — a new engine runs the same checks BlueGale does (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, and tested against eight deliberately broken seams |
@@ -55,7 +55,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 137 tests, all fixtures synthesized
+cargo test                                     # 144 tests, all fixtures synthesized
 scripts/smoke.sh target/release/kintsugi       # the repair loop, end to end, on this machine
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
@@ -163,10 +163,16 @@ three things a hand-copy does not:
   seam that installs it, line by line; if the patch has prose where the game has
   a label, or a label where the game has prose, the install stops before the
   copy is even made. Ids drift when a patch and a game come from different
-  versions, and a repair that lands on the wrong line is worse than no repair;
+  versions, and a repair that lands on the wrong line is worse than no repair. A
+  patch in which no line differs at all is refused too: a copy that is
+  byte-for-byte the original is not a repair, however green the report;
 * it **rebuilds rather than overwrites**: the bytes come from the seam's
   writer applied to the copy's own original, so untouched lines keep their exact
-  original bytes — including the CP932 spellings just described;
+  original bytes — including the CP932 spellings just described. A script that
+  lives inside an archive is repaired *inside* it, which is two files — the blob
+  and the index that points into it — because a loose script written beside an
+  archive would be shadowed by it: a copy that looks repaired and plays the
+  original words;
 * it **reads the result back**. The copy is mounted again, the script parsed
   again, and the number of changed lines compared with the number of
   replacements applied; if they disagree the install fails and says so. It also

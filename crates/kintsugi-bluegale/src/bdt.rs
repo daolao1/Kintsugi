@@ -15,7 +15,6 @@
 //! `docs/RESEARCH-BlueGale.md` but not yet parsed.)
 
 use kintsugi_core::error::{Error, Result};
-use kintsugi_core::plugin::WrittenScript;
 use kintsugi_core::script::{Command, Script};
 use kintsugi_core::vfs::VirtualPath;
 
@@ -117,10 +116,7 @@ pub fn parse_bdt(path: impl Into<VirtualPath>, data: &[u8]) -> Result<Script> {
 /// so decoding the whole file and encoding it again would silently re-spell
 /// lines nobody asked to touch, in a patch that reports `replaced` as it was.
 /// A repair that edits bytes it did not understand is not a repair.
-pub fn rewrite_bdt(
-    original: &[u8],
-    replacements: &BTreeMap<usize, String>,
-) -> Result<WrittenScript> {
+pub fn rewrite_bdt(original: &[u8], replacements: &BTreeMap<usize, String>) -> Result<Rewritten> {
     let plain: Vec<u8> = original.iter().map(|b| b ^ 0xFF).collect();
     let mut out: Vec<u8> = Vec::with_capacity(plain.len());
     let mut replaced = 0usize;
@@ -183,11 +179,27 @@ pub fn rewrite_bdt(
         .copied()
         .filter(|id| !matched.contains(id))
         .collect();
-    Ok(WrittenScript {
+    Ok(Rewritten {
         data: out.into_iter().map(|b| b ^ 0xFF).collect(),
         replaced,
         unmatched,
     })
+}
+
+/// A `.bdt` rewritten in memory: the whole file's new bytes, and what happened.
+///
+/// The bytes rather than a [`kintsugi_core::plugin::WrittenScript`], because a
+/// script's bytes do not always end up in a file of their own: the same result
+/// either becomes the new `story.bdt`, or goes back into the SNN blob it was
+/// packed in. Deciding that is the mount's job, not the writer's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rewritten {
+    /// The complete new contents of the script file.
+    pub data: Vec<u8>,
+    /// How many replacements were applied.
+    pub replaced: usize,
+    /// Ids that had no line to land on.
+    pub unmatched: Vec<usize>,
 }
 
 /// Refuse a replacement that would change the file's *structure* rather than

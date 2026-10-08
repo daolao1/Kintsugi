@@ -212,6 +212,30 @@ silently reformats a game is worse than no patch. `bdt::rewrite_bdt` shows the
 shape: one walk, shared in spirit with the parser, so a command index means the
 same thing to both halves.
 
+`write_script` returns two different things, and the caller decides which it
+wants:
+
+```rust
+WrittenScript {
+    script: Vec<u8>,           // the script's own bytes: what a patch file holds
+    files: Vec<WrittenFile>,   // what the game folder needs changed to carry them
+    replaced: usize,
+    unmatched: Vec<usize>,
+}
+```
+
+For a script that is a file of its own, `WrittenScript::loose(path, bytes, …)`
+fills both with the same single file, which is all most engines need. If your
+engine keeps scripts **inside a container** — an archive entry, a packed blob,
+an indexed resource — then `WrittenScript::packed(script, files, …)` is the
+honest answer: the script's own bytes are what a patch file holds, and the files
+are the container and its index, because leaving a loose script beside a
+container that shadows it produces a copy that looks repaired and plays the
+original words. Your mount also has to keep the caller's source order and insert
+each container directly in front of the source it was found in: a layer mounted
+*above* the game (the patch `install` overlays) must stay above the game's own
+archives, or the tool reads back its own patch as the original.
+
 ---
 
 ## 5. Synthesize fixtures and test end to end
@@ -258,10 +282,12 @@ game. The checker then insists, with a message that says what to do:
    from `metadata()`, because that id is what a user sees attached to a repair;
 4. an **empty folder is nobody's game** — no verdict at `Possible` or better;
 5. **changing nothing changes nothing** — `write_script` with an empty
-   replacement map must return the file byte-for-byte, or refuse. This is §2 of
+   replacement map must return the script's own bytes *and* every file it claims
+   to change byte-for-byte, or refuse. This is §2 of
    [ARCHITECTURE.md](../ARCHITECTURE.md) applied to your writer, and it is the
    rule that catches a writer which quietly re-encodes a file it was not asked
-   to touch.
+   to touch — a container seam fails it twice over if its index does not come
+   back identical.
 
 The checker is itself tested against deliberately broken seams
 (`crates/kintsugi-testkit/src/lib.rs`, eight of them), because a contract check

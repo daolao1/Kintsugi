@@ -250,23 +250,47 @@ fn assert_fixture_is_recognized(plugin: &dyn EnginePlugin, fixture: &SeamFixture
         );
 
         // Rule 5: changing nothing must change nothing.
+        let original_script_bytes = mount.vfs().read(&path).unwrap_or_else(|e| {
+            panic!("seam '{id}' read '{script_path}' but the mount has no such file: {e}")
+        });
         let untouched = std::collections::BTreeMap::new();
         match mount.write_script(&path, &untouched) {
             Ok(written) => {
-                // Compare against what the *mount* reads, not against the raw
-                // fixture: a seam is allowed to shadow the source it was handed
-                // (an archive in front of a loose file — BlueGale does exactly
-                // that), and the writer is only ever given the mounted view.
-                let original = mount.vfs().read(&path).unwrap_or_else(|e| {
-                    panic!("seam '{id}' read '{script_path}' but the mount has no such file: {e}")
-                });
+                // Every file the seam says it changed has to come back
+                // unchanged. Compare against what the *mount* reads, not against
+                // the raw fixture: a seam is allowed to shadow the source it was
+                // handed (an archive in front of a loose file — BlueGale does
+                // exactly that), and a writer is only ever given the mounted
+                // view. A script packed in an archive exercises this properly:
+                // its repair touches the blob *and* the index, and neither may
+                // differ when nothing was translated.
                 assert_eq!(
-                    written.data, original,
-                    "seam '{id}' rewrote '{script_path}' with no replacements to make: \
-                     `write_script` must copy every byte it was not asked to change \
-                     (ARCHITECTURE.md §2). The bytes differ even though nothing was \
-                     translated.",
+                    written.script, original_script_bytes,
+                    "seam '{id}' rewrote '{script_path}' with no replacements to make: the \
+                     script's own bytes must come back unchanged (this is what a patch file \
+                     holds)"
                 );
+                assert!(
+                    !written.files.is_empty(),
+                    "seam '{id}' wrote '{script_path}' with no replacements and reported no \
+                     files: a repair that changed nothing is a refusal, not an empty success"
+                );
+                for file in &written.files {
+                    let original = mount.vfs().read(&file.path).unwrap_or_else(|e| {
+                        panic!(
+                            "seam '{id}' says it wrote '{}' for '{script_path}', but the mount \
+                             has no such file: {e}",
+                            file.path
+                        )
+                    });
+                    assert_eq!(
+                        file.data, original,
+                        "seam '{id}' rewrote '{}' with no replacements to make: `write_script` \
+                         must copy every byte it was not asked to change (ARCHITECTURE.md §2). \
+                         The bytes differ even though nothing was translated.",
+                        file.path
+                    );
+                }
                 assert_eq!(
                     written.replaced, 0,
                     "seam '{id}' reports replacements for an empty replacement map"
@@ -374,11 +398,12 @@ mod tests {
                 // re-encodes, so a file nobody asked to change comes back
                 // different (here: without its trailing newline).
                 let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
-                return Ok(WrittenScript {
-                    data: format!("TOY1{}", text.trim_end_matches('\n')).into_bytes(),
-                    replaced: 0,
-                    unmatched: Vec::new(),
-                });
+                return Ok(WrittenScript::loose(
+                    path.clone(),
+                    format!("TOY1{}", text.trim_end_matches('\n')).into_bytes(),
+                    0,
+                    Vec::new(),
+                ));
             }
             let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
             let mut out = String::from("TOY1");
@@ -396,11 +421,12 @@ mod tests {
                     out.push('\n');
                 }
             }
-            Ok(WrittenScript {
-                data: out.into_bytes(),
+            Ok(WrittenScript::loose(
+                path.clone(),
+                out.into_bytes(),
                 replaced,
-                unmatched: Vec::new(),
-            })
+                Vec::new(),
+            ))
         }
     }
 
@@ -533,10 +559,13 @@ mod tests {
             assert_seam_contract(&ToyPlugin(Flaw::ReformatsWhenUntouched), &[toy_fixture()]);
         })
         .unwrap_err();
+        // Either message is the same defect caught at either end of the repair:
+        // the script's own bytes, or a file that carries them.
+        let message = panic_message(&failure);
         assert!(
-            panic_message(&failure).contains("must copy every byte it was not asked to change"),
-            "{}",
-            panic_message(&failure)
+            message.contains("the script's own bytes must come back unchanged")
+                || message.contains("must copy every byte it was not asked to change"),
+            "{message}"
         );
     }
 
