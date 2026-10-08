@@ -252,36 +252,6 @@ translating ja → en via mock
 repaired script: story.en.bdt (468 byte(s), 9/9 changed line(s))
 ```
 
-### Reading a game in a browser
-
-```sh
-cargo run --release -p kintsugi -- play ./oni --html oni.html --gallery graphics/bg
-```
-
-```
-player: 12010 line(s) → oni.html
-  · 44 picture(s) beside it, in the game's own order
-  · open it in any browser; the game folder was not written to
-```
-
-The same story the terminal would have printed, written as **one page that needs
-nothing from the network** — no server, no script tag pointing anywhere, styles
-and behaviour inline — because the point is to read a repaired 2008 visual novel
-on the same three platforms the engine is maintained for, and a page that
-fetched something would not open on a phone with no signal. Arrow keys or clicks
-turn the lines, `o` hides the marks, and the page keeps your place.
-
-Two things it refuses to do. It does not hide the cracks: a line the seam could
-not classify is marked as unclassified *on the page*, and the seam's own
-warnings are printed at the top in its own words, because a reader who cannot
-tell decoded from guessed is reading a story about the game rather than the
-game's story. And it does not pair pictures with lines: `--gallery FOLDER` shows
-the pictures under a folder **you** name — which folder is worth showing is a
-question about the game, not something an engine should answer — at their own
-size, and the page says in as many words that which line shows which picture is
-decided by code this seam does not read yet. Pairing them for effect would look
-better and mean less.
-
 ### Glazing pixels
 
 ```sh
