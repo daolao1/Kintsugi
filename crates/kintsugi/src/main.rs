@@ -15,7 +15,7 @@ use kintsugi_core::asset::Image;
 use kintsugi_core::codec::png::encode_png;
 use kintsugi_core::detect::Confidence;
 use kintsugi_core::error::{Error, Result};
-use kintsugi_core::plugin::{EngineMount, Registry};
+use kintsugi_core::plugin::{EngineMount, Registry, WrittenFile};
 use kintsugi_core::runtime::{Event, Host, Interpreter};
 use kintsugi_core::script::{ChoiceOption, Command, Script};
 use kintsugi_core::vfs::{MemorySource, Vfs, VirtualPath};
@@ -551,11 +551,7 @@ fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
         // Every file the repair changed, which is the script itself for a loose
         // script and the archive plus its index for a packed one. The seam says
         // which; the host writes them and nothing else.
-        for file in &written.files {
-            let destination = into.join(file.path.as_str());
-            std::fs::write(&destination, &file.data)
-                .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
-        }
+        write_written_files(&into, &written.files)?;
 
         // Read it back: the copy is mounted again and the script parsed again,
         // so the report is about the file on disk and not about the bytes in
@@ -1149,6 +1145,27 @@ fn occupied<'a>(names: impl Iterator<Item = &'a str>) -> Error {
 /// The destination's right to be written over is [`prepare_destination`]'s
 /// decision, made before this runs. Returns the file count, the bytes copied,
 /// and one human-readable line per thing it deliberately left out.
+/// Write the files a repair produced into the copy, making the folders they
+/// need on the way.
+///
+/// A repaired script can sit at a path that exists *only* inside a disc image:
+/// `exe/bsx.dat` beside the image shadows the copy inside it, which is how a
+/// game on a CD is played with a repair at all. The copy of the folder has no
+/// `exe/` to write into until this makes one, and an install that failed here
+/// would fail on exactly the games that most need repairing.
+fn write_written_files(into: &Path, files: &[WrittenFile]) -> Result<()> {
+    for file in files {
+        let destination = into.join(file.path.as_str());
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Io(format!("creating {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&destination, &file.data)
+            .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
+    }
+    Ok(())
+}
+
 fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64, Vec<String>)> {
     std::fs::create_dir_all(to)
         .map_err(|e| Error::Io(format!("creating {}: {e}", to.display())))?;
@@ -2339,6 +2356,38 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
+    /// A repair can name a path that exists only inside a disc image. Writing
+    /// it into a copy of the folder used to fail with `No such file or
+    /// directory`, and the install cleaned up after itself — so the games that
+    /// most need a repair were the ones it refused.
+    #[test]
+    fn a_repair_writes_into_a_folder_the_copy_does_not_have_yet() {
+        let into =
+            std::env::temp_dir().join(format!("kintsugi-install-parents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&into);
+        std::fs::create_dir_all(&into).unwrap();
+        let files = vec![
+            WrittenFile {
+                path: kintsugi_core::vfs::VirtualPath::new("exe/bsx.dat"),
+                data: b"a story where the image keeps its own".to_vec(),
+            },
+            WrittenFile {
+                path: kintsugi_core::vfs::VirtualPath::new("story.bdt"),
+                data: b"a loose script in the folder itself".to_vec(),
+            },
+        ];
+        write_written_files(&into, &files).expect("a repair makes the folders it needs");
+        assert_eq!(
+            std::fs::read(into.join("exe/bsx.dat")).unwrap(),
+            b"a story where the image keeps its own"
+        );
+        assert_eq!(
+            std::fs::read(into.join("story.bdt")).unwrap(),
+            b"a loose script in the folder itself"
+        );
+        let _ = std::fs::remove_dir_all(&into);
+    }
+
     use super::*;
 
     /// Every flag the help text offers must be a flag of at least one command,
