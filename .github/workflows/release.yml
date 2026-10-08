@@ -101,41 +101,8 @@ jobs:
             -output target/kintsugi-macos-universal
           lipo -info target/kintsugi-macos-universal
 
-      - name: smoke test the actual artifact
-        run: |
-          set -euo pipefail
-          ./target/kintsugi-macos-universal version
-          ./target/kintsugi-macos-universal demo --dir /tmp/kintsugi-ci-demo | tee /tmp/demo.txt
-          grep -q "bluegale" /tmp/demo.txt
-          grep -q "修复完成" /tmp/demo.txt
-          test -f /tmp/kintsugi-ci-demo/title-x4-anime4k.png
-
-      # The whole repair loop, on this platform, through the shipped binary:
-      # translate a script, install it into a copy, play the copy, and check the
-      # manifest that says what was done. A pipeline that only works on the
-      # maintainer's laptop is not a pipeline this project gets to claim.
-      - name: smoke test the repair loop
-        run: |
-          set -euo pipefail
-          exe=./target/kintsugi-macos-universal
-          demo=/tmp/kintsugi-ci-demo
-          patch=/tmp/kintsugi-ci-story.en.bdt
-          copy=/tmp/kintsugi-ci-repaired
-          rm -rf "$copy"
-          "$exe" translate "$demo" --mock --no-play --write-script "$patch"
-          "$exe" install "$demo" --script "$patch" --into "$copy" | tee /tmp/install.txt
-          grep -q "the original game folder is untouched" /tmp/install.txt
-          grep -q "installed story.bdt into the copy" /tmp/install.txt
-          test -f "$copy/.kintsugi-install"
-          cmp "$patch" "$copy/story.bdt"
-          "$exe" play "$copy" --auto | tee /tmp/play.txt
-          grep -q "mock: " /tmp/play.txt
-
-          # The exit-code contract, which scripts in the wild branch on: a mistyped
-          # command line is the caller's fault (2), not the game's (1).
-          code=0
-          "$exe" --faktur 4 > /dev/null 2>&1 || code=$?
-          test "$code" -eq 2
+      - name: smoke test the built binary
+        run: scripts/smoke.sh ./target/kintsugi-macos-universal
 
       - name: package
         run: |
@@ -166,48 +133,15 @@ jobs:
       - name: build
         run: cargo build --release -p kintsugi --target x86_64-pc-windows-msvc
 
-      - name: smoke test the actual artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          exe=target/x86_64-pc-windows-msvc/release/kintsugi.exe
-          "$exe" version
-          "$exe" demo --dir "$RUNNER_TEMP/kintsugi-ci-demo" | tee "$RUNNER_TEMP/demo.txt"
-          grep -q "bluegale" "$RUNNER_TEMP/demo.txt"
-          test -f "$RUNNER_TEMP/kintsugi-ci-demo/title-x4-anime4k.png"
-
-      # Windows runs the test suite too, not just the compiler: a platform this
-      # project claims to maintain is a platform its promises are checked on.
       - name: cargo test
         run: cargo test --workspace --all-features
 
-      # The whole repair loop, on this platform, through the shipped binary:
-      # translate a script, install it into a copy, play the copy, and check the
-      # manifest that says what was done. A pipeline that only works on the
-      # maintainer's laptop is not a pipeline this project gets to claim.
-      - name: smoke test the repair loop
+      # The repair loop through the *shipped* binary on this platform — the
+      # same `scripts/smoke.sh` the other two jobs run, so "it works on
+      # Windows" and "it works on macOS" are the same sentence.
+      - name: smoke test the built binary
         shell: bash
-        run: |
-          set -euo pipefail
-          exe=target/x86_64-pc-windows-msvc/release/kintsugi.exe
-          demo=$RUNNER_TEMP/kintsugi-ci-demo
-          patch=$RUNNER_TEMP/kintsugi-ci-story.en.bdt
-          copy=$RUNNER_TEMP/kintsugi-ci-repaired
-          rm -rf "$copy"
-          "$exe" translate "$demo" --mock --no-play --write-script "$patch"
-          "$exe" install "$demo" --script "$patch" --into "$copy" | tee $RUNNER_TEMP/install.txt
-          grep -q "the original game folder is untouched" $RUNNER_TEMP/install.txt
-          grep -q "installed story.bdt into the copy" $RUNNER_TEMP/install.txt
-          test -f "$copy/.kintsugi-install"
-          cmp "$patch" "$copy/story.bdt"
-          "$exe" play "$copy" --auto | tee $RUNNER_TEMP/play.txt
-          grep -q "mock: " $RUNNER_TEMP/play.txt
-
-          # The exit-code contract, which scripts in the wild branch on: a mistyped
-          # command line is the caller's fault (2), not the game's (1).
-          code=0
-          "$exe" --faktur 4 > /dev/null 2>&1 || code=$?
-          test "$code" -eq 2
+        run: scripts/smoke.sh target/x86_64-pc-windows-msvc/release/kintsugi.exe "$RUNNER_TEMP/kintsugi-smoke"
 
       - name: package
         shell: bash
@@ -237,40 +171,8 @@ jobs:
       - name: build
         run: cargo build --release -p kintsugi
 
-      - name: smoke test the actual artifact
-        run: |
-          set -euo pipefail
-          ./target/release/kintsugi version
-          ./target/release/kintsugi demo --dir /tmp/kintsugi-ci-demo | tee /tmp/demo.txt
-          grep -q "bluegale" /tmp/demo.txt
-          test -f /tmp/kintsugi-ci-demo/title-x4-anime4k.png
-
-      # The whole repair loop, on this platform, through the shipped binary:
-      # translate a script, install it into a copy, play the copy, and check the
-      # manifest that says what was done. A pipeline that only works on the
-      # maintainer's laptop is not a pipeline this project gets to claim.
-      - name: smoke test the repair loop
-        run: |
-          set -euo pipefail
-          exe=./target/release/kintsugi
-          demo=/tmp/kintsugi-ci-demo
-          patch=/tmp/kintsugi-ci-story.en.bdt
-          copy=/tmp/kintsugi-ci-repaired
-          rm -rf "$copy"
-          "$exe" translate "$demo" --mock --no-play --write-script "$patch"
-          "$exe" install "$demo" --script "$patch" --into "$copy" | tee /tmp/install.txt
-          grep -q "the original game folder is untouched" /tmp/install.txt
-          grep -q "installed story.bdt into the copy" /tmp/install.txt
-          test -f "$copy/.kintsugi-install"
-          cmp "$patch" "$copy/story.bdt"
-          "$exe" play "$copy" --auto | tee /tmp/play.txt
-          grep -q "mock: " /tmp/play.txt
-
-          # The exit-code contract, which scripts in the wild branch on: a mistyped
-          # command line is the caller's fault (2), not the game's (1).
-          code=0
-          "$exe" --faktur 4 > /dev/null 2>&1 || code=$?
-          test "$code" -eq 2
+      - name: smoke test the built binary
+        run: scripts/smoke.sh ./target/release/kintsugi
 
       - name: package
         run: |
@@ -373,8 +275,12 @@ jobs:
             🏺 Repairing old games with gold. 以金缮之艺，续老游戏之命。
 
             Every artifact here is built from this commit. The macOS, Windows,
-            and Linux archives are smoke-tested by *running* `kintsugi demo` on
-            them. The Android APK cannot be run on a CI runner, so that job
+            and Linux archives are smoke-tested by *running* the whole repair
+            loop on them — `demo`, then `translate --mock`, then `install
+            --into`, then playing the repaired copy — and by checking that a
+            mistyped command line still exits 2. The Windows job also runs the
+            test suite, not just the compiler. The Android APK cannot be run on
+            a CI runner, so that job
             unpacks it and proves all four ABI slices (arm64-v8a,
             armeabi-v7a, x86_64, x86) are inside instead — it is a **debug**
             build, signed with the Android debug key, and release signing is a
