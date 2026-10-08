@@ -120,6 +120,10 @@ fn run(args: &[String]) -> std::result::Result<(), Failure> {
 fn registry() -> Registry {
     let mut registry = Registry::new();
     registry.register(Arc::new(kintsugi_bluegale::plugin()));
+    // Engine two. Nothing else in this file knows what BSX is: the formats,
+    // the file names and the pictures live behind these two lines, which is
+    // the whole point of the seam.
+    registry.register(Arc::new(kintsugi_bsx::plugin()));
     registry
 }
 
@@ -1287,9 +1291,82 @@ impl Host for TerminalHost {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Open whatever the user pointed at: a game folder, or a disc image holding one.
+///
+/// Old games are handed over as disc images far more often than as folders — the
+/// release this engine was measured against only exists as an `.iso` inside an
+/// archive — and asking someone to mount a disc before they can run `detect`
+/// would be asking them to do the tool's job. A mounted disc still works, since a
+/// mount point is a folder.
 fn open_game(dir: &str) -> Result<Vfs> {
     let root = PathBuf::from(dir);
-    Vfs::from_directory(&root)
+    if root.is_dir() {
+        return Vfs::from_directory(&root);
+    }
+    let extension = root
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "iso" => Vfs::from_iso(&root),
+        // A `.mds` is a description of a disc, not the disc: it names the
+        // sectors of a `.mdf`. BlueGale's release ships one beside its `.iso`,
+        // so the useful answer is to read the image that is actually there
+        // rather than to explain the difference.
+        "mds" => {
+            let beside = root.with_extension("iso");
+            if beside.is_file() {
+                let note = format!(
+                    "reading {} beside {}, because a .mds describes a disc rather than \
+                     holding one",
+                    beside.display(),
+                    root.display()
+                );
+                println!("{}", dim(&note));
+                return Vfs::from_iso(&beside);
+            }
+            Err(Error::unsupported(
+                "disc description",
+                format!(
+                    "'{}' is a disc description and there is no '{}' beside it to read; point \
+                     at the image itself",
+                    root.display(),
+                    beside.display()
+                ),
+            ))
+        }
+        // An archive that holds a disc image is a delivery format, not a game.
+        // Saying which file to extract and how beats a generic error, and it
+        // keeps a compressed format's decoder out of a project that would then
+        // have to keep it correct forever.
+        "rar" | "7z" | "zip" | "tar" | "gz" | "bz2" | "xz" => Err(Error::unsupported(
+            "an archive holding a game",
+            format!(
+                "'{}' is a compressed archive; Kintsugi reads games, not archives. Extract it \
+                 first — on macOS `bsdtar -xf '{}'` (or The Unarchiver) — and point this \
+                 command at the folder or the .iso that comes out",
+                root.display(),
+                root.display()
+            ),
+        )),
+        _ => {
+            if root.is_file() {
+                Err(Error::unsupported(
+                    "game input",
+                    format!(
+                        "'{}' is a file Kintsugi cannot open; point at the game's folder or at \
+                         a disc image (.iso)",
+                        root.display()
+                    ),
+                ))
+            } else {
+                Err(Error::NotFound(format!(
+                    "there is nothing at '{}'",
+                    root.display()
+                )))
+            }
+        }
+    }
 }
 
 fn print_verdicts(vfs: &Vfs) -> Result<Vec<(usize, kintsugi_core::detect::Detection)>> {

@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 kintsugi-core.workspace = true
 kintsugi-bluegale = { workspace = true }
+kintsugi-bsx = { workspace = true }
 kintsugi-video.workspace = true
 jni = { version = "0.21", optional = true }
 

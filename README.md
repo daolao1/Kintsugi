@@ -36,6 +36,8 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | --- | --- |
 | **Body** — engine-agnostic asset/script IR, VFS, runtime, detection registry, zero dependencies | working |
 | **Seam №1 — BlueGale (ブルーゲイル)**: SNN+INX archives, ZBM/BBM bitmaps, BDT scripts | working |
+| **Seam №2 — BlueGale BSX (the 2008 engine)**: BSArc archives (4,377 files read out of a 937 MB disc image), BSG pictures (RLE, indexed and true colour), mountable straight from an `.iso` | working — its compiled `BSScript` story is documented and *not* read yet ([research notes](docs/RESEARCH-BSX.md)) |
+| **Disc images**: point a command at a game folder, an `.iso`, or the `.mds` beside one | working |
 | **Glaze — HD upscaling**: `nearest`, `bilinear`, `bicubic`, `lanczos3`, `anime4k` (Anime4K-style preset) | working |
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
@@ -44,9 +46,10 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Engine-agnostic host**: which script a game is played through, and which files are its pictures, come from the seam (`primary_script`, `image_extensions`) rather than from names hardcoded in the CLI; a flag a command does not use exits `2` instead of being silently ignored, and `--help` anywhere prints usage | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
-| **Seam contract**: `kintsugi-testkit` — a new engine runs the same checks BlueGale does (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, and tested against eight deliberately broken seams |
-| **Seam №2…N** — other engines | the reason the body exists; [adding one](docs/ADDING-AN-ENGINE.md) is a crate and two registration lines |
+| **Seam contract**: `kintsugi-testkit` — every engine runs the same checks (a name is never evidence, `Certain` means mountable, changing nothing changes nothing) | working, tested against eight deliberately broken seams, and run by **two** unrelated engine families |
+| **Seam №3…N** — other engines | the reason the body exists; [adding one](docs/ADDING-AN-ENGINE.md) is a crate and two registration lines |
 | BlueGale **AMV** video | *not implemented* — an honest hole, see [research notes](docs/RESEARCH-BlueGale.md) |
+| BlueGale BSX **`BSScript`** story, and **LZ**-compressed BSG pictures | *not implemented* — refused by name, layouts documented in [docs/RESEARCH-BSX.md](docs/RESEARCH-BSX.md) |
 
 ---
 
@@ -426,9 +429,10 @@ should not be done quietly.**
 | document | what is in it |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | the four layers, the zero-dependency rule, the plugin contract, the honesty rules |
-| [docs/ADDING-AN-ENGINE.md](docs/ADDING-AN-ENGINE.md) | how to add engine №2: the trait, the detection ladder, the test fixtures |
+| [docs/ADDING-AN-ENGINE.md](docs/ADDING-AN-ENGINE.md) | how to add an engine: the trait, the detection ladder, the test fixtures |
 | [docs/PLATFORMS.md](docs/PLATFORMS.md) | how Android, macOS, and Windows are built, tested, and released together |
 | [docs/RESEARCH-BlueGale.md](docs/RESEARCH-BlueGale.md) | every reverse-engineered fact, its source, and what is still unknown |
+| [docs/RESEARCH-BSX.md](docs/RESEARCH-BSX.md) | the same for the 2008 BSX engine: `BSArc`, `BSG`, what `BSScript` holds, what is refused and why |
 
 ## Credits and prior art
 

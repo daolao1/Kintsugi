@@ -45,6 +45,7 @@ use kintsugi_video::upscale::{UpscaleMethod, upscale};
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
     registry.register(Arc::new(kintsugi_bluegale::plugin()));
+    registry.register(Arc::new(kintsugi_bsx::plugin()));
     registry
 }
 

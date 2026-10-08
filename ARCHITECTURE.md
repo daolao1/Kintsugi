@@ -28,6 +28,7 @@ body        engine-agnostic core, zero dependencies
 | --- | --- | --- | --- |
 | `kintsugi-core` | body | nothing | **none** |
 | `kintsugi-bluegale` | seam | core | `encoding_rs` (CP932) |
+| `kintsugi-bsx` | seam | core | `encoding_rs` (CP932) |
 | `kintsugi-video` | glaze | core | none |
 | `kintsugi-translate` | glaze | core | `serde`, `serde_json`, `ureq` |
 | `kintsugi` | host + shell | core, seams, glaze | none of its own |

@@ -15,5 +15,6 @@ path = "src/main.rs"
 [dependencies]
 kintsugi-core.workspace = true
 kintsugi-bluegale.workspace = true
+kintsugi-bsx.workspace = true
 kintsugi-video.workspace = true
 kintsugi-translate.workspace = true

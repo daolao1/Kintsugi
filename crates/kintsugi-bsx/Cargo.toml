@@ -1,0 +1,16 @@
+[package]
+name = "kintsugi-bsx"
+description = "Golden seam for BlueGale's BSX engine: BSArc archives and BSG images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kintsugi-core.workspace = true
+encoding_rs.workspace = true
+
+[dev-dependencies]
+kintsugi-testkit.workspace = true

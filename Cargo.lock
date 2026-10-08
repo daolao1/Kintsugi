@@ -275,6 +275,7 @@ name = "kintsugi"
 version = "0.2.0"
 dependencies = [
  "kintsugi-bluegale",
+ "kintsugi-bsx",
  "kintsugi-core",
  "kintsugi-translate",
  "kintsugi-video",
@@ -286,12 +287,22 @@ version = "0.2.0"
 dependencies = [
  "jni",
  "kintsugi-bluegale",
+ "kintsugi-bsx",
  "kintsugi-core",
  "kintsugi-video",
 ]
 
 [[package]]
 name = "kintsugi-bluegale"
+version = "0.2.0"
+dependencies = [
+ "encoding_rs",
+ "kintsugi-core",
+ "kintsugi-testkit",
+]
+
+[[package]]
+name = "kintsugi-bsx"
 version = "0.2.0"
 dependencies = [
  "encoding_rs",

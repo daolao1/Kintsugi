@@ -1202,3 +1202,107 @@ mod install {
         );
     }
 }
+
+#[test]
+fn the_shell_works_on_a_second_engine_it_was_never_told_about() {
+    // The body is supposed to be engine-agnostic: adding an engine should mean
+    // adding a crate and a registration line, and nothing else. This test is
+    // the evidence — the shell is handed a format family it has no code for,
+    // and `detect`, `inspect` and `upscale` have to work anyway.
+    let temp = TempDir::new("second-engine");
+    let game = temp.0.join("game");
+    kintsugi_bsx::fixtures::write_demo_game(&game).unwrap();
+    let game_arg = game.to_str().unwrap();
+
+    let detected = run(&["detect", game_arg]);
+    assert!(
+        detected.status.success(),
+        "detect failed: {}",
+        stderr(&detected)
+    );
+    let text = stdout(&detected);
+    assert!(text.contains("bsx"), "detect should name the seam: {text}");
+    assert!(
+        text.contains("●●●"),
+        "a release with its own configuration and story file is a certainty: {text}"
+    );
+
+    let inspected = run(&["inspect", game_arg]);
+    assert!(
+        inspected.status.success(),
+        "inspect failed: {}",
+        stderr(&inspected)
+    );
+    let text = stdout(&inspected);
+    assert!(
+        text.contains("BlueGale BSX"),
+        "inspect should name the engine: {text}"
+    );
+    assert!(
+        text.contains("graphics/room.bsg"),
+        "the archive's entries should be visible under the archive's name: {text}"
+    );
+    assert!(
+        text.contains("no script found"),
+        "this seam cannot read BSScript yet and must say so rather than guess: {text}"
+    );
+
+    // The point of the whole exercise: a picture out of a 2008 container,
+    // through the body's upscaler, at twice the size.
+    let output = temp.0.join("room.png");
+    let upscaled = run(&[
+        "upscale",
+        game_arg,
+        "graphics/room.bsg",
+        "--output",
+        output.to_str().unwrap(),
+        "--factor",
+        "2",
+    ]);
+    assert!(
+        upscaled.status.success(),
+        "upscale failed: {}",
+        stderr(&upscaled)
+    );
+    let png = fs::read(&output).expect("upscale should write a picture");
+    assert_eq!(
+        &png[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "the output should be a PNG"
+    );
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!((width, height), (8, 8), "a 4x4 picture at factor 2 is 8x8");
+}
+
+#[test]
+fn a_script_the_seam_cannot_read_leaves_nothing_behind() {
+    let temp = TempDir::new("second-engine-script");
+    let game = temp.0.join("game");
+    kintsugi_bsx::fixtures::write_demo_game(&game).unwrap();
+    let before = listing(&game.join("exe"));
+    let out = temp.0.join("translated.bdt");
+
+    let output = run(&[
+        "translate",
+        game.to_str().unwrap(),
+        "--mock",
+        "--write-script",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a seam that cannot read the script is a refusal, not a crash: {}",
+        stderr(&output)
+    );
+    assert!(
+        !out.exists(),
+        "a refused translation must not leave a file behind"
+    );
+    assert_eq!(
+        listing(&game.join("exe")),
+        before,
+        "a refused translation must not touch the game"
+    );
+}
