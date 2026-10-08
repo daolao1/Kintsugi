@@ -86,6 +86,21 @@ for all five `Java_com_kintsugi_engine_EngineBridge_*` symbols. A mismatch
 between the Kotlin declarations and the Rust exports is the classic Android
 `UnsatisfiedLinkError` — the app installs, launches, and dies on the first tap.
 
+Both checks run locally in four commands. The harness is C, so it is compiled
+against the library rather than run by `cargo test` (a `cc` build dependency to
+avoid one documented command is not a trade worth making):
+
+```sh
+cargo build -p kintsugi-android                        # the C ABI
+clang -Wall -Wextra -Werror -Icrates/kintsugi-android/include \
+      crates/kintsugi-android/tests/c_abi.c -Ltarget/debug -lkintsugi_android -o /tmp/c_abi
+DYLD_LIBRARY_PATH=target/debug /tmp/c_abi              # LD_LIBRARY_PATH on Linux
+cargo build -p kintsugi-android --features jni-bridge  # then the name check
+nm -gU target/debug/libkintsugi_android.dylib | grep Java_com_kintsugi_engine
+```
+
+(`nm -gU` is macOS; Linux wants `nm -D --defined-only`.)
+
 ## Exit codes (CLI)
 
 Scriptable behaviour, so a repair can run inside make/CI:

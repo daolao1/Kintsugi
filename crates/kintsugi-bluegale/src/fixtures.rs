@@ -204,7 +204,8 @@ pub fn write_demo_game(dir: &Path) -> Result<Vec<PathBuf>> {
                 "demo game",
                 format!(
                     "'{}' already holds {} file(s) ({}{}) and was not written by this \
-                     command; refusing to write a demo game over them",
+                     command; refusing to write a demo game over them — delete that \
+                     folder or point --dir at a new one",
                     dir.display(),
                     occupied.len(),
                     shown.join(", "),

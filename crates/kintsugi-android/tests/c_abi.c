@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The ABI this library exports. Kept in the test, not in a header, so a
  * change in the Rust signatures shows up here as a compile error. */
@@ -59,7 +60,17 @@ int main(void) {
         kintsugi_free(version);
     }
 
-    const char *dir = "/tmp/kintsugi-c-abi-demo";
+    /* A fresh directory per run: the demo refuses to write over a folder it
+     * did not create, and a fixed path would carry state from an earlier run
+     * (which is the difference between passing on a clean CI machine and
+     * failing on a developer's second run). */
+    char template[] = "/tmp/kintsugi-c-abi-demo-XXXXXX";
+    char *dir = mkdtemp(template);
+    if (dir == NULL) {
+        fprintf(stderr, "FAIL: cannot create a temporary directory\n");
+        return 1;
+    }
+    printf("demo directory: %s\n", dir);
 
     char *demo = take(kintsugi_demo(dir));
     if (demo) {

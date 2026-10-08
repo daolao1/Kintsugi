@@ -149,6 +149,31 @@ fn rejects_truncated_pixel_data() {
     assert!(matches!(decode_bmp(&bmp), Err(Error::Corrupt { .. })));
 }
 
+/// A header is not a promise. A 194-byte file claiming to be 65535x65535
+/// (16 GB of RGBA) must be refused *before* anything tries to allocate it:
+/// `Image::new` panics on an impossible size, and an abort from a malformed
+/// game file would be a crash, not a diagnosis.
+#[test]
+fn refuses_a_header_that_claims_an_impossible_size() {
+    let mut bmp = build_bmp(1, 1, 24, &[], &[0, 0, 0, 0]);
+    bmp[18..22].copy_from_slice(&65535u32.to_le_bytes()); // biWidth
+    bmp[22..26].copy_from_slice(&65535u32.to_le_bytes()); // biHeight
+
+    let err = decode_bmp(&bmp).unwrap_err().to_string();
+    assert!(
+        err.contains("65535x65535") && err.contains("pixel limit"),
+        "expected the pixel-limit refusal, got: {err}"
+    );
+}
+
+/// Zero in either dimension is degenerate, not a 0x0 image.
+#[test]
+fn refuses_a_degenerate_size() {
+    let bmp = build_bmp(0, 4, 24, &[], &[]);
+    let err = decode_bmp(&bmp).unwrap_err().to_string();
+    assert!(err.contains("degenerate size"), "{err}");
+}
+
 #[test]
 fn rejects_bad_signature() {
     assert!(matches!(
