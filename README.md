@@ -56,6 +56,7 @@ git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
 cargo test                                     # 137 tests, all fixtures synthesized
+scripts/smoke.sh target/release/kintsugi       # the repair loop, end to end, on this machine
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
 cargo run -p kintsugi -- inspect ./demo-game
@@ -170,7 +171,13 @@ three things a hand-copy does not:
   again, and the number of changed lines compared with the number of
   replacements applied; if they disagree the install fails and says so. It also
   re-checks that the game folder and the original script are byte-for-byte what
-  they were, because a tool that only claims this is a tool you have to trust.
+  they were, because a tool that only claims this is a tool you have to trust;
+* it **either finishes or leaves nothing**. A copy Kintsugi created is removed
+  again if the install does not finish — an error, or a bug in the writing half
+  — because a half-made copy of someone's game is worse than no copy at all: the
+  next run would refuse it by name and ask you to delete something you did not
+  create. Every line of the report is printed from the finished state, so a
+  half-installed copy is never described as a repaired one.
 
 ```sh
 $ cargo run -p kintsugi -- install demo-game --script story.en.bdt --into repaired
@@ -195,7 +202,7 @@ answer by reading a file in the copy, not by trusting this README.
 ```
 $ cat repaired/.kintsugi-install
 kintsugi-install	1
-tool	0.1.1
+tool	0.2.0
 engine	bluegale
 game	/tmp/kt-doc2/demo-game
 script	story.bdt

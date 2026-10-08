@@ -21,11 +21,11 @@ android {
         applicationId = "com.kintsugi.engine"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
+        versionCode = 3
         // Kept in step with the workspace version by a check in CI
         // (.github/workflows/release.yml), because two version numbers that
         // drift apart is how a user ends up reporting a bug in the wrong build.
-        versionName = "0.1.1"
+        versionName = "0.2.0"
 
         ndk {
             // The ABIs CI builds with cargo-ndk. Keeping the list here means
