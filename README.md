@@ -126,7 +126,9 @@ cargo run --release -p kintsugi -- translate "/path/to/game" \
 * `--mock` runs the whole pipeline offline, which is how the pipeline is
   tested without a network or a bill;
 * the translated script is applied to a **copy** in memory, and `--write-script`
-  writes a patch **beside** the original — never over it;
+  writes a patch **beside** the original. Pointing it at the file being read is
+  refused outright (exit `2`) and the original is left byte-identical — the
+  promise is a check in the code, not a sentence in this file;
 * the patch is byte-preserving: labels, indentation, line endings, blank lines,
   and anything the seam did not understand survive exactly, and only the lines
   that were actually translated change. Lines whose id has no home in the

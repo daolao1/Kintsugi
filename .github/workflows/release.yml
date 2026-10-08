@@ -190,7 +190,15 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
       - uses: Swatinem/rust-cache@v2
+      # `tools` was removed from the SDK repository in 2025, and the action's
+      # default package list still asks for it ("Failed to find package
+      # 'tools'"). Name what AGP 8.7 actually needs instead of taking the
+      # default, so the job does not depend on a package that no longer ships.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
@@ -199,7 +207,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
+      # Pinned, not inherited: AGP 8.7.3 supports Gradle 8.9–8.x and the
+      # runner's default Gradle may be 9.x, which it does not.
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
 
       - name: build the engine for every ABI
         env:

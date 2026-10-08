@@ -838,6 +838,20 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
             .collect();
         let written = mount.write_script(&script_path, &replacements)?;
         let path = PathBuf::from(out_path);
+        // The original is not a target. A loose script inside the game folder
+        // is the one file this tool must never write, so the promise is
+        // structural rather than documentary: refuse and say what to do.
+        let original_on_disk = Path::new(dir).join(script_path.as_str());
+        if same_file(&original_on_disk, &path) {
+            return Err(Failure::Usage(format!(
+                "refusing to write the patch over the original: {} is the file \
+                 being read.\n         Write the repair somewhere else (for example \
+                 {}) and keep the original as it is;\n         installing a patch is \
+                 your decision, not this tool's.",
+                path.display(),
+                suggested_patch_path(&original_on_disk).display()
+            )));
+        }
         std::fs::write(&path, &written.data)
             .map_err(|e| Error::Io(format!("writing {}: {e}", path.display())))?;
         println!(
@@ -871,6 +885,38 @@ fn cmd_translate(args: &[String]) -> std::result::Result<(), Failure> {
     Interpreter::new(merged).run(&mut host)?;
     println!("{}", dim("  ————————————————————————"));
     Ok(())
+}
+
+/// Where a repair should go instead: `story.bdt` suggests `story.repaired.bdt`,
+/// so the patch sits beside the original with the seam visible in the name.
+fn suggested_patch_path(original: &Path) -> PathBuf {
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("script");
+    let name = match original.extension().and_then(|e| e.to_str()) {
+        Some(extension) => format!("{stem}.repaired.{extension}"),
+        None => format!("{stem}.repaired"),
+    };
+    original.with_file_name(name)
+}
+
+/// True when two paths name the same file, tolerating a destination that does
+/// not exist yet (in which case its parent directory is resolved instead).
+fn same_file(a: &Path, b: &Path) -> bool {
+    fn resolve(path: &Path) -> Option<PathBuf> {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return Some(canonical);
+        }
+        // Not created yet: compare the directory it would land in plus the
+        // name, which is how `a/./b.bdt` and `a/b.bdt` become equal.
+        let parent = std::fs::canonicalize(path.parent()?).ok()?;
+        Some(parent.join(path.file_name()?))
+    }
+    match (resolve(a), resolve(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Glossary files: one `source = target` pair per line, `#` comments.

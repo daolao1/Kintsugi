@@ -25,16 +25,14 @@ The listing matters: GARbro's BlueGale module has exactly those four files and
 
 **`ArcBDT.cs` and `BdtTables.cs` are not BlueGale.** `ArcBDT.cs` is namespace
 `GameRes.Formats.FC01`, calls itself "Fairytale resource archive", carries
-signature `'PACK'` (`0x4B434150`), reads its index at offset 12, opens
-`dt0NN.bdt` archives and names Fairytale's 『Tsuki Jong』 (2002-12-28);
-`BdtTables.cs` holds that format's AGSI key tables. Both live in
-`ArcFormats/FC01/`, the shared `.bdt` extension is a coincidence, and **no
-BlueGale label or opcode table has been found** anywhere (§4). Also wrong or
-imprecise: `BitStream.cs` is shared infrastructure, whose `MsbBitStream.GetBits`
-fixes ZBM's bit order as MSB-first (§2); "one flag bit per group" (ZBM has one
-discarded leading bit, then self-describing 8-bit tokens whose own MSB is the
-flag); and `README.md`'s credits, which list BDT under `ArcFormats/BlueGale/`
-(being corrected separately).
+signature `'PACK'` (`0x4B434150`), and `BdtTables.cs` holds that format's AGSI
+key tables; both live in `ArcFormats/FC01/`, the shared `.bdt` extension is a
+coincidence, and **no BlueGale label or opcode table has been found** anywhere
+(§4). Also wrong or imprecise: `BitStream.cs` is shared infrastructure, whose
+`MsbBitStream.GetBits` fixes ZBM's bit order as MSB-first (§2); "one flag bit
+per group" (ZBM has one discarded leading bit, then self-describing 8-bit tokens
+whose own MSB is the flag); and `README.md`'s credits, which list BDT under
+`ArcFormats/BlueGale/` (being corrected separately).
 
 ## 1. SNN + INX — the resource archive pair
 
@@ -88,7 +86,12 @@ Both require `unpacked_size >= 0x36` (= 54 = 14-byte BMP file header + 40-byte
 `BITMAPINFOHEADER`, the smallest header-only payload) and `data_offset >= 14`;
 we also require `data_offset <= len` and cap the payload at 256 MiB
 (`MAX_UNPACKED_SIZE`) — a refusal of an attacker-controlled size that no real
-file is known to approach.
+file is known to approach. The payload is a plain BMP (we hand it to
+`crates/kintsugi-core/src/codec/bmp.rs::decode_bmp`), optionally obfuscated:
+when it starts with `0xBD 0xB2` (`'B' ^ 0xFF`, `'M' ^ 0xFF`) the first
+`min(100, len)` bytes are XOR-ed with `0xFF` (`zbm::deobfuscate`;
+`ZbmFormat.Decrypt`). Obfuscation happened *before* packing, so un-XORing
+happens *after* unpacking — `fixtures::make_zbm` mirrors that order.
 
 **The LZ stream** (`ZbmFormat.Unpack`; ours `zbm::lz_unpack`). Bits are
 MSB-first: `MsbBitStream.GetBits` returns the top of a left-shifted cache, and
@@ -103,17 +106,9 @@ Both clip the copy to the remaining space and stop when the bits run out. We are
 stricter where GARbro is silent: `offset == 0`, an offset past the bytes
 written, and a stream ending before the declared size are all `Error::Corrupt`
 (the reference returns a short buffer) — whether any real file needs that
-tolerance is **unconfirmed**.
-
-**Obfuscation.** After unpacking, if the first bytes are `0xBD 0xB2` (`'B' ^
-0xFF`, `'M' ^ 0xFF`) the first `min(100, len)` bytes are XOR-ed with `0xFF`
-(`zbm::deobfuscate`; `ZbmFormat.Decrypt`): the payload was obfuscated *before*
-packing, so un-XORing happens *after* unpacking, and `fixtures::make_zbm`
-mirrors that. The result is a plain BMP for
-`crates/kintsugi-core/src/codec/bmp.rs::decode_bmp`; GARbro instead reads
-width/height/bpp from BMP-absolute offsets `0x12`/`0x16`/`0x1C`. `is_zbm` checks
-only length ≥ 14 and the magic, so a loose ZBM is weak evidence (§6); version,
-size, and offset are enforced by `decode_zbm`.
+tolerance is **unconfirmed**. `is_zbm` checks only length ≥ 14 and the magic, so
+a loose ZBM is weak evidence (§6); version, size, and offset are enforced by
+`decode_zbm`.
 
 ## 3. BBM — obfuscated bitmap
 
@@ -197,20 +192,18 @@ call would trade that risk for false refusals, since the heuristic also demands
 `VideoAMV.cs` describes the container: magic `ampV` (`0x56706D61`), `i16`
 version 1 at offset 4, unpacked frame size at `0x16`, width/height at
 `0x1A`/`0x1E`, a frame count at `0x2A`, and from `0x32` a list of
-`(u32 size, packed frame)` pairs. Each frame uses the *same* ZBM LZ routine,
-into `unpacked_size + 0x36` bytes at output offset `0x0E`, and GARbro
-synthesizes a BMP header around it (`BM`, total size at 2, `header_size + 0x0E`
-at `0x0A` — the pixel-data offset, because the frame begins 14 bytes in).
+`(u32 size, packed frame)` pairs, each frame unpacked with the *same* ZBM LZ
+routine and wrapped in a synthesized BMP header.
 
 Kintsugi implements none of it: `plugin.rs` lists `amv` in the extension
 metadata but no code path reads one, and detection never returns a verdict for
-an `.amv` file — the hole is visible in `README.md` and `lib.rs`. Why not now:
-GARbro's support is *frame extraction* (one BMP per frame), not playback, and
-the consulted file says nothing about timing, delta coding, audio, or how the
-engine drives frames, so "AMV support" would be a demuxer we cannot check
-against anything. Video demux/decode is a large, separate task, and a seam that
-fakes it would be worse than one that names the file and refuses; reusing the
-ZBM LZ is the one cheap part, and the rest needs real footage.
+an `.amv` file — the hole is visible in `README.md` and `lib.rs`. GARbro itself
+only *extracts frames* (one BMP each), not playback, and the consulted file says
+nothing about timing, delta coding, audio, or how the engine drives frames, so
+"AMV support" would be a demuxer we cannot check against anything. Video
+demux/decode is a large, separate task, and a seam that fakes it would be worse
+than one that names the file and refuses; reusing the ZBM LZ is the one cheap
+part, and the rest needs real footage.
 
 ## 6. Detection honesty and the confidence ladder
 
@@ -277,6 +270,7 @@ the CLI printed `金継ぎ&#8212;&#8212;金&#32558;` before the check existed
 | 9 | BMP dialect coverage; lossy CP932 decode | our decoder refuses `BITMAPCOREHEADER` and RLE; `had_errors` ignored | decode every image of a real game and count refusals; surface `had_errors` as a `Script::warnings` entry |
 | 10 | `parse_bdt` does not consult `looks_like_bdt` | a non-script `.bdt` would decode to garbage, but the heuristic counts only column-0 labels and needs ≥60% CP932-printable bytes, so genuine indented or binary-heavy scripts would be falsely refused | decide the trade-off with real files: measure how many real scripts pass `looks_like_bdt` before wiring it into the parser |
 | 11 | AMV (whole format); loose plain-BMP images | frame table and ZBM LZ reuse known; `read_image` accepts `BM` | obtain real `.amv` data and a real release directory before extending either path |
+| 12 | BDT line separator | CRLF assumed; the extractor's configured `contentSeparate` was not in the consulted copy | scan a real `.bdt` for lone CR/LF after de-XOR |
 
 Every item needs data from a real game folder, which must never be committed:
 the fixtures are synthesized (§9).
@@ -284,36 +278,32 @@ the fixtures are synthesized (§9).
 ## 9. How to re-verify these claims
 
 Everything runnable in-tree was run when this document was written (2026-10-08):
-`cargo test -p kintsugi-bluegale` passes 26 unit + 8 integration tests, and
-`cargo test -p kintsugi` adds 5 host-level patch tests in
-`crates/kintsugi/tests/patch.rs`. Both suites build from a clean checkout with
-`cargo build --workspace`.
+`cargo build --workspace` builds, `cargo test -p kintsugi-bluegale` passes 26
+unit + 8 integration tests, and `cargo test -p kintsugi` adds 5 host-level patch
+tests (`crates/kintsugi/tests/patch.rs`).
 
 `cargo run -p kintsugi -- demo` writes `game.inx`/`game.snn`/`story.bdt` into
 `demo-game/` (gitignored and regenerated, not checked in), prints the `certain`
 INX/SNN verdict of §6, plays the script, and upscales the title screen to
-`demo-game/title-x4-anime4k.png`; `--dir DIR` writes elsewhere, `--auto` skips
-the prompt, and `detect`/`inspect` on that directory print the verdict and the
-mounted file list. The offline write path is
-`cargo run -p kintsugi -- translate ./demo-game --mock --auto --no-play --write-script ./demo-game/out.bdt`,
-after which `cargo run -p kintsugi -- play ./demo-game --script out.bdt --auto`
-reads the patch back; diffing the two files must show only translated lines.
+`demo-game/title-x4-anime4k.png`; `--dir DIR` writes elsewhere and `--auto`
+skips the prompt. The offline write path is
+`cargo run -p kintsugi -- translate ./demo-game --mock --auto --no-play
+--write-script ./demo-game/out.bdt`, followed by `cargo run -p kintsugi -- play
+./demo-game --script out.bdt --auto`; diffing the two files must show only
+translated lines.
 
-The checks that need no game are the tests: `roundtrip.rs` synthesizes a
+The checks that need no game are the tests. `roundtrip.rs` synthesizes a
 release, detects it as `certain`, mounts it, reads images, audio, and script,
 and interprets the script end to end; `patch.rs` drives the write path. The ZBM
 back-reference path is covered by a hand-assembled bit stream in `zbm.rs`'s
-tests, because `fixtures.rs` has no compressor and emits literal-only streams
-(which real decoders accept).
+tests, because `fixtures.rs` has no compressor and emits literal-only streams.
 
-**All fixtures are synthesized.** `crates/kintsugi-bluegale/src/fixtures.rs`
-writes valid INX, SNN, ZBM, BBM, and BDT bytes from scratch — including the
-demo's Japanese script, written for this project — so no copyrighted bytes,
-artwork, or text from any commercial title is in the repository. That is also
-why "verified" here means "two independent implementations agree", never "seen
-in a shipped game". The reference copies behind these notes lived under
-`/tmp/kintsugi-research/` (ephemeral); to go further, fetch
-[GARbro](https://github.com/morkt/GARbro) (MIT) — BlueGale support under
-`ArcFormats/BlueGale/`, bit reader at `ArcFormats/BitStream.cs` — and the
-SExtractor Python extractor (`src/extract_BlueGale_bdt.py`). Where a claim is
+**All fixtures are synthesized** — `crates/kintsugi-bluegale/src/fixtures.rs`
+writes valid INX, SNN, ZBM, BBM, and BDT bytes from scratch, the demo's Japanese
+script included — so no copyrighted bytes, artwork, or text from any commercial
+title is in the repository. That is also why "verified" here means "two
+independent implementations agree", never "seen in a shipped game". The
+reference copies lived under `/tmp/kintsugi-research/`; to go further, fetch
+[GARbro](https://github.com/morkt/GARbro) (MIT, BlueGale support under
+`ArcFormats/BlueGale/`) and the SExtractor Python extractor. Where a claim is
 marked unconfirmed, the fix is a real game folder plus a measurement.

@@ -9,9 +9,16 @@
 //! `Java_<package>_<Class>_<method>`, with dots and underscores escaped. The
 //! Kotlin side is `com.kintsugi.engine.EngineBridge`, so the names below are
 //! `Java_com_kintsugi_engine_EngineBridge_*`.
+//!
+//! The second parameter is a [`JObject`], not a `JClass`, because the Kotlin
+//! side is an `object`: its functions are *instance* methods on the singleton,
+//! so the JVM passes the instance. (Adding `@JvmStatic` on the Kotlin side
+//! would make them static and flip this to `JClass`; the two are the same
+//! pointer at the ABI level, which is exactly why the mistake would go
+//! unnoticed at run time and should be spelled out here.)
 
 use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use jni::objects::{JObject, JString};
 use jni::sys::jstring;
 
 /// Fetch a JVM string as a Rust `String`, treating null as absent.
@@ -43,7 +50,7 @@ fn answer(env: &mut JNIEnv<'_>, body: impl FnOnce() -> crate::Result<String>) ->
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_version(
     mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
+    _this: JObject<'_>,
 ) -> jstring {
     let text = format!("kintsugi {}", env!("CARGO_PKG_VERSION"));
     give_string(&mut env, text)
@@ -53,7 +60,7 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_version(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_detect(
     mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
+    _this: JObject<'_>,
     dir: JString<'_>,
 ) -> jstring {
     let dir = take_string(&mut env, &dir);
@@ -64,7 +71,7 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_detect(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_play(
     mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
+    _this: JObject<'_>,
     dir: JString<'_>,
     script: JString<'_>,
 ) -> jstring {
@@ -79,7 +86,7 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_play(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_demo(
     mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
+    _this: JObject<'_>,
     dir: JString<'_>,
 ) -> jstring {
     let dir = take_string(&mut env, &dir);
@@ -90,7 +97,7 @@ pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_demo(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_kintsugi_engine_EngineBridge_upscale(
     mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
+    _this: JObject<'_>,
     dir: JString<'_>,
     asset: JString<'_>,
     factor: jni::sys::jint,

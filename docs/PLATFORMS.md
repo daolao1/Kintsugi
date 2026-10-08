@@ -86,10 +86,14 @@ Scriptable behaviour, so a repair can run inside make/CI:
 | --- | --- |
 | `0` | the repair was done |
 | `1` | the engine refused (unreadable file, unmappable text, no such asset) |
-| `2` | the command line was wrong (unknown flag, missing value) |
+| `2` | the command line was wrong (unknown flag, missing value, or a request the tool refuses to carry out) |
 
 Usage errors are separated from engine errors on purpose: `--faktur 4` should
-not look like a broken game file.
+not look like a broken game file. One refusal sits in this class deliberately:
+pointing `--write-script` at the very file being read exits `2`, because
+overwriting an original is a mistake in the *request*, not a fault in the game —
+and the original is verified byte-identical afterwards (`same_file` in
+`crates/kintsugi/src/main.rs`).
 
 ## What CI verifies, per platform
 

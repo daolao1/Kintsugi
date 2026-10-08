@@ -4,9 +4,13 @@
 // `crates/kintsugi-android` is the engine, and `app/src/main/jniLibs/` is
 // where `cargo ndk` drops one `.so` per ABI. See `platforms/android/README.md`
 // for the exact commands.
+// No versions here on purpose: the root project puts both plugins on the
+// build script's classpath with `apply false`, and Gradle rejects a version
+// that is requested again from a subproject ("plugin request for plugin
+// already on the classpath must not include a version").
 plugins {
-    id("com.android.application") version "8.7.3"
-    id("org.jetbrains.kotlin.android") version "2.0.21"
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
