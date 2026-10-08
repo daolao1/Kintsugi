@@ -151,7 +151,7 @@ Every job builds its artifact, and every job whose artifact is a program
 
 | job | checks |
 | --- | --- |
-| `verify` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, the C ABI harness, and the `nm` JNI symbol check |
+| `verify` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, the C ABI harness, the `nm` JNI symbol check, and — on a tag — that the tag matches the version inside the binary it just built |
 | `macos` | both architectures build, `lipo` joins them, the universal binary's `demo` run produces the expected output and the glazed PNG exists |
 | `windows` | same smoke test on `kintsugi.exe` |
 | `linux` | same smoke test |
