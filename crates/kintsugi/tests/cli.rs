@@ -372,3 +372,272 @@ fn an_impossible_frame_count_is_refused_by_the_engine_not_the_parser() {
         "a refused interpolation must not leave an output folder behind"
     );
 }
+
+/// `install` is the step that puts a repair somewhere playable, so these tests
+/// are about what it refuses as much as what it writes. Everything here runs
+/// the real binary, because the promises are about files on disk.
+mod install {
+    use super::*;
+
+    /// Make a demo game and the patch `translate` would produce for it.
+    fn game_and_patch(temp: &TempDir, tag: &str) -> (PathBuf, PathBuf) {
+        let game = temp.0.join(format!("game-{tag}"));
+        kintsugi_bluegale::fixtures::write_demo_game(&game).unwrap();
+        let patch = temp.0.join(format!("patch-{tag}.bdt"));
+        let output = run(&[
+            "translate",
+            game.to_str().unwrap(),
+            "--mock",
+            "--no-play",
+            "--write-script",
+            patch.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "the patch this test needs was not produced; stderr: {}",
+            stderr(&output)
+        );
+        (game, patch)
+    }
+
+    #[test]
+    fn the_repair_lands_in_the_copy_and_the_original_is_untouched() {
+        let temp = TempDir::new("install-ok");
+        let (game, patch) = game_and_patch(&temp, "ok");
+        let original_before = fs::read(game.join("story.bdt")).unwrap();
+        let files_before = listing(&game);
+        let copy = temp.0.join("repaired");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        // The installed script is byte-for-byte what `translate` wrote: the
+        // install goes through the seam's writer again, from the copy's own
+        // original bytes, and round-trips exactly.
+        assert_eq!(
+            fs::read(copy.join("story.bdt")).unwrap(),
+            fs::read(&patch).unwrap(),
+            "the installed script differs from the patch it was made from"
+        );
+        // ...and the game it came from is exactly as it was.
+        assert_eq!(listing(&game), files_before, "the game folder changed");
+        assert_eq!(
+            fs::read(game.join("story.bdt")).unwrap(),
+            original_before,
+            "install modified the original script"
+        );
+        // The copy is a playable game, not just a folder of files.
+        let played = run(&["play", copy.to_str().unwrap(), "--auto"]);
+        assert_eq!(
+            played.status.code(),
+            Some(0),
+            "the copy does not play; stderr: {}",
+            stderr(&played)
+        );
+        assert!(
+            stdout(&played).contains("mock: "),
+            "the copy plays the original words instead of the repair: {}",
+            stdout(&played)
+        );
+    }
+
+    /// A copy inside the game folder is the original wearing a hat.
+    #[test]
+    fn a_copy_inside_the_game_folder_is_refused() {
+        let temp = TempDir::new("install-inside");
+        let (game, patch) = game_and_patch(&temp, "inside");
+        let copy = game.join("repaired");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("refusing to write the repaired copy inside the game folder"),
+            "stderr: {}",
+            stderr(&output)
+        );
+        assert!(!copy.exists(), "a refused install created the copy anyway");
+    }
+
+    /// A folder that already holds something is not a copy we may write over.
+    #[test]
+    fn a_folder_that_already_holds_something_is_refused() {
+        let temp = TempDir::new("install-occupied");
+        let (game, patch) = game_and_patch(&temp, "occupied");
+        let copy = temp.0.join("repaired");
+        fs::create_dir_all(&copy).unwrap();
+        fs::write(copy.join("someone-elses-save.dat"), b"do not lose me").unwrap();
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("refusing to write a repaired copy over them"),
+            "stderr: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            fs::read(copy.join("someone-elses-save.dat")).unwrap(),
+            b"do not lose me",
+            "a refused install touched a file that was already there"
+        );
+        assert_eq!(listing(&copy), vec!["someone-elses-save.dat".to_string()]);
+    }
+
+    /// The dangerous case: a patch whose lines do not sit where the game's
+    /// lines sit. Ids drift when a patch and a game come from different
+    /// versions, and a repair that lands on the wrong line is worse than none.
+    #[test]
+    fn a_patch_that_does_not_line_up_is_refused_before_anything_is_copied() {
+        let temp = TempDir::new("install-misaligned");
+        let (game, _) = game_and_patch(&temp, "misaligned");
+        // One extra label at the top shifts every id by one.
+        let original = fs::read(game.join("story.bdt")).unwrap();
+        let shifted = kintsugi_bluegale::fixtures::make_bdt(&format!(
+            "$extra\r\n{}",
+            kintsugi_bluegale::bdt::decode_bdt_text(&original)
+        ));
+        let patch = temp.0.join("shifted.bdt");
+        fs::write(&patch, &shifted).unwrap();
+        let copy = temp.0.join("repaired");
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            copy.to_str().unwrap(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("does not line up with this game"),
+            "stderr: {}",
+            stderr(&output)
+        );
+        assert!(
+            !copy.exists(),
+            "the refusal must come before the copy is made, or a half-repaired \
+             folder is left behind"
+        );
+    }
+
+    /// A script served from an archive cannot be repaired by writing a file
+    /// beside it: the archive shadows loose files, so the copy would look
+    /// repaired and play the original words.
+    #[test]
+    fn a_script_that_lives_in_an_archive_is_refused() {
+        let temp = TempDir::new("install-archived");
+        let game = temp.0.join("game");
+        fs::create_dir_all(&game).unwrap();
+        // A game whose only script is inside the archive: `game.inx` + `game.snn`
+        // hold STORY.BDT, and there is no `story.bdt` file on disk.
+        let script = kintsugi_bluegale::fixtures::make_bdt("$start\r\nこんにちは。\r\n%fin\r\n");
+        let (snn, placements) = kintsugi_bluegale::fixtures::make_snn(&[&script]);
+        let (offset, size) = placements[0];
+        let inx = kintsugi_bluegale::fixtures::make_inx(&[("STORY.BDT", offset, size)]);
+        fs::write(game.join("game.inx"), &inx).unwrap();
+        fs::write(game.join("game.snn"), &snn).unwrap();
+        let patch = temp.0.join("patch.bdt");
+        fs::write(&patch, &script).unwrap();
+
+        let output = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+            "--into",
+            temp.0.join("repaired").to_str().unwrap(),
+        ]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("served from an archive"),
+            "stderr: {}",
+            stderr(&output)
+        );
+    }
+
+    /// Both flags are required, and saying which one is missing is the whole
+    /// point of a usage error.
+    #[test]
+    fn install_without_its_flags_is_a_usage_error() {
+        let temp = TempDir::new("install-flags");
+        let (game, patch) = game_and_patch(&temp, "flags");
+
+        let missing_script = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--into",
+            temp.0.join("copy-a").to_str().unwrap(),
+        ]);
+        assert_eq!(
+            missing_script.status.code(),
+            Some(2),
+            "stderr: {}",
+            stderr(&missing_script)
+        );
+        assert!(
+            stderr(&missing_script).contains("install needs --script FILE"),
+            "stderr: {}",
+            stderr(&missing_script)
+        );
+
+        let missing_into = run(&[
+            "install",
+            game.to_str().unwrap(),
+            "--script",
+            patch.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            missing_into.status.code(),
+            Some(2),
+            "stderr: {}",
+            stderr(&missing_into)
+        );
+        assert!(
+            stderr(&missing_into).contains("install needs --into DIR"),
+            "stderr: {}",
+            stderr(&missing_into)
+        );
+        assert!(
+            !temp.0.join("copy-a").exists(),
+            "a usage error must not leave a folder behind"
+        );
+    }
+}

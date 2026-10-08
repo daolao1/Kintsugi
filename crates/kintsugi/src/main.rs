@@ -16,8 +16,8 @@ use kintsugi_core::detect::Confidence;
 use kintsugi_core::error::{Error, Result};
 use kintsugi_core::plugin::{EngineMount, Registry};
 use kintsugi_core::runtime::{Event, Host, Interpreter};
-use kintsugi_core::script::{ChoiceOption, Command};
-use kintsugi_core::vfs::{Vfs, VirtualPath};
+use kintsugi_core::script::{ChoiceOption, Command, Script};
+use kintsugi_core::vfs::{FileSource, Vfs, VirtualPath};
 use kintsugi_translate::{
     Glossary, LlmTranslator, MockTranslator, Translator, extract_with_raw, write_jsonl,
 };
@@ -74,6 +74,7 @@ fn run(args: &[String]) -> std::result::Result<(), Failure> {
         Some("upscale") => cmd_upscale(&args[1..]),
         Some("interpolate") => cmd_interpolate(&args[1..]),
         Some("translate") => cmd_translate(&args[1..]),
+        Some("install") => cmd_install(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("kintsugi {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -139,6 +140,8 @@ impl Args {
         "glossary",
         "jsonl-dir",
         "write-script",
+        "into",
+        "as",
     ];
 
     /// Boolean flags, listed so a typo gets reported instead of ignored.
@@ -250,6 +253,420 @@ fn parse_factor(text: &str, max: u32) -> std::result::Result<u32, Failure> {
         }));
     }
     Ok(factor)
+}
+
+/// Install a repaired script into a copy of the game — never into the game.
+///
+/// This is the last step of the hero workflow (`translate` writes the patch,
+/// `install` puts it somewhere playable), and it is the step where a tool can
+/// do the most damage. So it does three things no hand-copy does:
+///
+/// * it **refuses a patch that does not line up**. The patch is parsed by the
+///   same seam that will install it, line by line, and any id where the patch
+///   has prose and the game has structure (or the other way round) stops the
+///   install. Ids drift when a patch and a game come from different versions,
+///   and a repair that lands on the wrong line is worse than no repair.
+/// * it **rebuilds rather than overwrites**. The bytes written come from the
+///   seam's writer applied to the *copy's own* original, so every line the
+///   patch did not translate keeps its exact original bytes — the same
+///   guarantee `translate` makes, held at install time.
+/// * it **reads the result back**. The copy is mounted again, the script is
+///   parsed again, and the number of changed lines is compared with the number
+///   of replacements. If they disagree, the install failed and says so.
+fn cmd_install(args: &[String]) -> std::result::Result<(), Failure> {
+    let args = Args::parse(args).map_err(Failure::Usage)?;
+    let dir = args.require_position(0, "game directory")?;
+    let Some(patch_arg) = args.flag("script") else {
+        return Err(Failure::Usage(
+            "install needs --script FILE: the repaired script to install \
+             (the file `translate --write-script` produced)"
+                .into(),
+        ));
+    };
+    let Some(into_arg) = args.flag("into") else {
+        return Err(Failure::Usage(
+            "install needs --into DIR: the copy to put the repair in".into(),
+        ));
+    };
+    let patch_path = PathBuf::from(patch_arg);
+    let into = PathBuf::from(into_arg);
+
+    // The read-only rule, before anything is read: a copy inside the game
+    // folder would be the original wearing a hat.
+    ensure_outside_game(Path::new(dir), &into, "the repaired copy")?;
+
+    let registry = registry();
+    let original_vfs = open_game(dir)?;
+    let (_, original_mount) = registry.mount_best(&original_vfs)?;
+    let target = pick_script(original_mount.as_ref(), args.flag("as"))?;
+
+    // A script the VFS serves from an archive is not a file in the game folder,
+    // and repairing it means rebuilding that archive, which no seam can do yet.
+    // Writing a loose file beside it would be worse than refusing: the archive
+    // shadows loose files, so the copy would look repaired and play the old
+    // words. Asking the filesystem — not the shape of the name — is what tells
+    // the two cases apart, since an archive entry is a flat lowercase name.
+    let target_path = Path::new(dir).join(target.as_str());
+    if !target_path.is_file() {
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "'{target}' is not a file in the game folder, so it is served from an \
+                 archive. Repairing it there means rebuilding that archive, which this \
+                 seam cannot do yet, and a loose file written beside it would be shadowed \
+                 by the archive: a copy that looks repaired and plays the original words"
+            ),
+        )));
+    }
+
+    let original = original_mount.read_script(&target)?;
+    let patch_bytes = std::fs::read(&patch_path)
+        .map_err(|e| Error::Io(format!("reading the patch {}: {e}", patch_path.display())))?;
+
+    // Let the *seam* read the patch: it is the only code that knows what a
+    // script in this engine looks like. The overlay shadows the target name
+    // with the patch bytes, so `read_script` parses the patch as this game's
+    // script would be parsed.
+    let mut overlay = open_game(dir)?;
+    overlay.push_front(Arc::new(InMemoryFile::new(target.as_str(), patch_bytes)));
+    let (_, patch_mount) = registry.mount_best(&overlay)?;
+    let patched = patch_mount.read_script(&target)?;
+
+    // Line by line: what would change, and what must not.
+    let mut replacements: BTreeMap<usize, String> = BTreeMap::new();
+    let mut misfits: Vec<String> = Vec::new();
+    for (id, before) in original.commands.iter().enumerate() {
+        let Some(after) = patched.commands.get(id) else {
+            continue;
+        };
+        match (line_text(before), line_text(after)) {
+            (Some(before), Some(after)) => {
+                if before != after {
+                    replacements.insert(id, after.to_string());
+                }
+            }
+            (None, Some(_)) => misfits.push(format!(
+                "line {id} is a {} in this game and the patch has prose for it",
+                line_kind(before)
+            )),
+            (Some(_), None) => misfits.push(format!(
+                "line {id} is prose in this game and the patch has a {} for it",
+                line_kind(after)
+            )),
+            (None, None) => {}
+        }
+    }
+    if !misfits.is_empty() {
+        let shown = misfits
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let more = if misfits.len() > 3 {
+            format!(" (and {} more)", misfits.len() - 3)
+        } else {
+            String::new()
+        };
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "the patch does not line up with this game: {shown}{more}. \
+                 Ids drift when a patch and a game come from different versions, \
+                 and a repair that lands on the wrong line is worse than no repair"
+            ),
+        )));
+    }
+
+    // What the original looked like, so that "the original is untouched" can be
+    // a measurement rather than a sentence.
+    let originals_before = tree_names(Path::new(dir))?;
+    let target_bytes_before = std::fs::read(&target_path).ok();
+
+    // The copy.
+    let (files, bytes, skipped) = copy_tree(Path::new(dir), &into)?;
+    println!(
+        "{}",
+        dim(format!(
+            "copied {files} file(s), {bytes} byte(s), to {}",
+            into.display()
+        ))
+    );
+    for warning in &skipped {
+        println!("{}", dim(format!("  · {warning}")));
+    }
+
+    // The bytes come from the *copy's* own original, through the seam's writer.
+    let copy_vfs = open_game(&into.to_string_lossy())?;
+    let (_, copy_mount) = registry.mount_best(&copy_vfs)?;
+    let written = copy_mount.write_script(&target, &replacements)?;
+    let destination = into.join(target.as_str());
+    std::fs::write(&destination, &written.data)
+        .map_err(|e| Error::Io(format!("writing {}: {e}", destination.display())))?;
+
+    // Read it back: the copy is mounted again and the script parsed again, so
+    // the report is about the file on disk and not about the bytes in hand.
+    let read_back_vfs = open_game(&into.to_string_lossy())?;
+    let (_, read_back_mount) = registry.mount_best(&read_back_vfs)?;
+    let read_back = read_back_mount.read_script(&target)?;
+    let changed = count_changed_lines(&original, &read_back);
+    let engine = read_back_mount.info().engine.clone();
+    let notes = read_back_mount.info().notes.clone();
+    println!("{}", dim(format!("the copy mounts as {}", gold(&engine))));
+    for note in &notes {
+        println!("{}", dim(format!("  [mount] {note}")));
+    }
+
+    if written.unmatched.is_empty() {
+        println!(
+            "installed {} into the copy: {} of {} line(s) differ from the original",
+            gold(target.as_str()),
+            changed,
+            original.commands.len()
+        );
+    } else {
+        println!(
+            "installed {} into the copy: {} of {} line(s) differ from the original",
+            gold(target.as_str()),
+            changed,
+            original.commands.len()
+        );
+        let ids: Vec<String> = written
+            .unmatched
+            .iter()
+            .take(8)
+            .map(usize::to_string)
+            .collect();
+        let more = if written.unmatched.len() > 8 {
+            format!(" and {} more", written.unmatched.len() - 8)
+        } else {
+            String::new()
+        };
+        println!(
+            "{}",
+            dim(format!(
+                "  · {} line(s) of the patch have no line in this game to land on \
+                 (ids: {}{more})",
+                written.unmatched.len(),
+                ids.join(", ")
+            ))
+        );
+    }
+
+    // The verification that matters: the file on disk reads back as the patch
+    // said it would, and the game it came from is byte-for-byte what it was.
+    if changed != replacements.len() {
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "the copy does not read back as the patch wrote it: {changed} line(s) \
+                 differ, but {} replacement(s) were applied — the copy at {} is not \
+                 what this command claimed to write",
+                replacements.len(),
+                into.display()
+            ),
+        )));
+    }
+    let originals_after = tree_names(Path::new(dir))?;
+    let target_bytes_after = std::fs::read(&target_path).ok();
+    if originals_before != originals_after || target_bytes_before != target_bytes_after {
+        return Err(Failure::Engine(Error::unsupported(
+            "install",
+            format!(
+                "the game folder changed while installing a repair: {} was modified or \
+                 gained a file. Nothing in this command writes there, so this is a bug \
+                 — stop and report it rather than playing the game",
+                dir
+            ),
+        )));
+    }
+    println!(
+        "{}",
+        dim(format!(
+            "the original game folder is untouched ({} file(s), '{}' byte-identical)",
+            originals_after.len(),
+            target.as_str()
+        ))
+    );
+    println!(
+        "→ play the repaired copy: {}",
+        dim(format!("kintsugi play {} --auto", into.display()))
+    );
+    Ok(())
+}
+
+/// A file that exists only in memory, so a seam can read a script the user
+/// named on the command line through the same code path it uses for a game.
+struct InMemoryFile {
+    path: VirtualPath,
+    bytes: Vec<u8>,
+}
+
+impl InMemoryFile {
+    fn new(path: &str, bytes: Vec<u8>) -> Self {
+        Self {
+            path: VirtualPath::new(path),
+            bytes,
+        }
+    }
+}
+
+impl FileSource for InMemoryFile {
+    fn read(&self, path: &VirtualPath) -> Result<Vec<u8>> {
+        if path == &self.path {
+            return Ok(self.bytes.clone());
+        }
+        Err(Error::NotFound(format!(
+            "'{path}' is not in this in-memory source (it holds only '{}')",
+            self.path
+        )))
+    }
+
+    fn list(&self) -> Vec<(VirtualPath, u64)> {
+        vec![(self.path.clone(), self.bytes.len() as u64)]
+    }
+}
+
+/// The words of a line — the part a translation may replace — or `None` when
+/// the line is structure and prose has no business standing there.
+fn line_text(command: &Command) -> Option<&str> {
+    match command {
+        Command::Narration(text) => Some(text),
+        Command::Dialogue { text, .. } => Some(text),
+        Command::RawLine(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// What a line is, for a refusal a human can act on.
+fn line_kind(command: &Command) -> &'static str {
+    match command {
+        Command::Narration(_) => "narration line",
+        Command::Dialogue { .. } => "dialogue line",
+        Command::RawLine(_) => "raw line",
+        Command::Label(_) => "label",
+        Command::Jump(_) => "jump",
+        Command::Choice(_) => "choice",
+        Command::SetBackground(_) => "background change",
+        Command::ShowCharacter { .. } => "character sprite",
+        _ => "engine command",
+    }
+}
+
+fn count_changed_lines(before: &Script, after: &Script) -> usize {
+    before
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(id, command)| match after.commands.get(*id) {
+            Some(after) => line_text(command) != line_text(after),
+            None => line_text(command).is_some(),
+        })
+        .count()
+}
+
+/// Every file and directory under `root`, as sorted relative paths.
+///
+/// Used to prove the game folder did not change, so it must not skip anything
+/// that a write could plausibly create.
+fn tree_names(root: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| Error::Io(format!("reading {}: {e}", dir.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::Io(format!("reading {}: {e}", dir.display())))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            names.push(relative);
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                stack.push(path);
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Copy a directory tree, refusing a destination that already holds anything.
+///
+/// The refusal is the same one `demo` makes, for the same reason: a tool that
+/// writes over a folder it did not create cannot tell a stale copy from
+/// someone's installation. Returns the file count, the bytes copied, and one
+/// human-readable line per thing it deliberately left out.
+fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64, Vec<String>)> {
+    if to.exists() {
+        let existing = tree_names(to)?;
+        if !existing.is_empty() {
+            let shown: Vec<&str> = existing.iter().take(4).map(String::as_str).collect();
+            let more = if existing.len() > 4 {
+                format!(" and {} more", existing.len() - 4)
+            } else {
+                String::new()
+            };
+            return Err(Error::unsupported(
+                "install",
+                format!(
+                    "'{}' already holds {} entr(ies) ({}{more}); refusing to write a \
+                     repaired copy over them — delete that folder or point --into at a \
+                     new one",
+                    to.display(),
+                    existing.len(),
+                    shown.join(", ")
+                ),
+            ));
+        }
+    }
+    std::fs::create_dir_all(to)
+        .map_err(|e| Error::Io(format!("creating {}: {e}", to.display())))?;
+
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let mut skipped = Vec::new();
+    let mut stack = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, destination)) = stack.pop() {
+        let entries = std::fs::read_dir(&source)
+            .map_err(|e| Error::Io(format!("reading {}: {e}", source.display())))?;
+        let mut entries: Vec<_> = entries
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Io(format!("reading {}: {e}", source.display())))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let target = destination.join(entry.file_name());
+            let kind = entry
+                .file_type()
+                .map_err(|e| Error::Io(format!("reading {}: {e}", path.display())))?;
+            if kind.is_symlink() {
+                // Following it could copy something outside the game, and
+                // recreating it would make the copy depend on a path elsewhere.
+                skipped.push(format!(
+                    "left out the symlink '{}' (a repair copy holds real files)",
+                    path.display()
+                ));
+            } else if kind.is_dir() {
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| Error::Io(format!("creating {}: {e}", target.display())))?;
+                stack.push((path, target));
+            } else {
+                let copied = std::fs::copy(&path, &target).map_err(|e| {
+                    Error::Io(format!(
+                        "copying {} to {}: {e}",
+                        path.display(),
+                        target.display()
+                    ))
+                })?;
+                files += 1;
+                bytes += copied;
+            }
+        }
+    }
+    Ok((files, bytes, skipped))
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1565,24 @@ fn usage_text() -> String {
         &mut text,
         "          --no-play            don't play the result",
     );
+    line(&mut text, "");
+    line(
+        &mut text,
+        "  kintsugi install <DIR> --script FILE --into COPY [--as NAME]",
+    );
+    line(
+        &mut text,
+        "        Put a repaired script into a copy of the game (never into",
+    );
+    line(
+        &mut text,
+        "        the game), then mount the copy and read the script back to",
+    );
+    line(
+        &mut text,
+        "        prove it landed. Refuses a patch whose lines do not line up",
+    );
+    line(&mut text, "        with this game's lines.");
     line(&mut text, "");
     line(&mut text, "  kintsugi version");
     line(&mut text, "");

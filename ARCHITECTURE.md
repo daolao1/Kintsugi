@@ -242,6 +242,16 @@ Vfs::from_directory → Registry::detect_all → mount_best
     → read_script → Command::Label / RawLine preview
 ```
 
+**`kintsugi install GAME --script out.bdt --into COPY`**
+
+Where the repair stops being a file and becomes a game you can play — in a copy,
+because the original is not a place this tool writes. `install` parses the patch
+with the seam's own reader, refuses any line where the patch's prose and the
+game's structure disagree (ids drift between versions, and a repair on the wrong
+line is worse than none), rebuilds the script from the *copy's* original bytes,
+and then mounts the copy and reads it back to check that the number of changed
+lines equals the number of replacements applied.
+
 **`kintsugi translate GAME --write-script out.bdt`**
 
 ```

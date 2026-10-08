@@ -40,6 +40,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 | **Glaze — frame interpolation (插帧)**: `interpolate` command, gap-filling contract, size-aware sequencing, blend backend; motion-compensated backends plug into the same trait | working |
 | **Glaze — script translation**: JSONL interchange + LLM backend (OpenAI-compatible), glossary, offline `--mock` | working |
 | **Translation write-back**: a repaired script written outside the game folder, byte-preserving and CP932-strict | working |
+| **Install**: put a repaired script into a copy of the game, refusing a patch whose lines do not line up, and reading the copy back to prove it landed | working |
 | **Shells — Windows / macOS / Linux CLI** | working |
 | **Shell — Android APK** (Kotlin + JNI over the same Rust engine) | built in CI from the same commit; the APK is unpacked to prove all four ABIs are inside — running it on a device is not automated yet ([PLATFORMS](docs/PLATFORMS.md)) |
 | **Seam №2…N** — other engines | the reason the body exists |
@@ -53,7 +54,7 @@ Kintsugi repairs them with modern code, and **keeps the repair visible**:
 git clone git@github.com:daolao1/Kintsugi.git
 cd Kintsugi
 
-cargo test                                     # 110 tests, all fixtures synthesized
+cargo test                                     # 124 tests, all fixtures synthesized
 cargo run -p kintsugi -- demo                  # write a tiny game, detect it, play it, glaze it
 cargo run -p kintsugi -- detect  ./demo-game
 cargo run -p kintsugi -- inspect ./demo-game
@@ -109,7 +110,9 @@ cargo run --release -p kintsugi -- upscale "/path/to/game"      # list image ass
 ```
 
 Originals are never written to. The only files Kintsugi creates are the ones
-you ask for (`-o out.png`, `--jsonl-dir dir`, the demo game).
+you ask for (`-o out.png`, `--jsonl-dir dir`, `install --into copy`, the demo
+game), and the game folder is read-only to every command — checked in the code
+(`ensure_outside_game`), not promised in prose.
 
 ### Translating a script
 
@@ -143,6 +146,45 @@ cargo run --release -p kintsugi -- translate "/path/to/game" \
   the original file are reported, not dropped;
 * a translation the target code page cannot hold is **refused by name** (see
   the CP932 note below) rather than silently mangled.
+
+Installing the patch is a command, not a suggestion to copy files by hand:
+
+```sh
+cargo run --release -p kintsugi -- install "/path/to/game" \
+    --script out/story.en.bdt --into /tmp/repaired
+```
+
+It writes the repair into a **copy**, never into the game it read, and it does
+three things a hand-copy does not:
+
+* it **refuses a patch that does not line up**. The patch is parsed by the same
+  seam that installs it, line by line; if the patch has prose where the game has
+  a label, or a label where the game has prose, the install stops before the
+  copy is even made. Ids drift when a patch and a game come from different
+  versions, and a repair that lands on the wrong line is worse than no repair;
+* it **rebuilds rather than overwrites**: the bytes come from the seam's
+  writer applied to the copy's own original, so untouched lines keep their exact
+  original bytes — including the CP932 spellings just described;
+* it **reads the result back**. The copy is mounted again, the script parsed
+  again, and the number of changed lines compared with the number of
+  replacements applied; if they disagree the install fails and says so. It also
+  re-checks that the game folder and the original script are byte-for-byte what
+  they were, because a tool that only claims this is a tool you have to trust.
+
+```sh
+$ cargo run -p kintsugi -- install demo-game --script story.en.bdt --into repaired
+copied 5 file(s), 2799 byte(s), to repaired
+the copy mounts as bluegale
+  [mount] mounted 'game.snn': 8 entries
+installed story.bdt into the copy: 9 of 14 line(s) differ from the original
+the original game folder is untouched (5 file(s), 'story.bdt' byte-identical)
+→ play the repaired copy: kintsugi play repaired --auto
+```
+
+`9 of 14` because a script is not all prose: the four `$`/`%` labels are
+structure, counted in the total and never rewritten. The copy's `story.bdt` is
+byte-for-byte the patch `translate` wrote — a property the tests assert, since
+it means the two commands agree about what a repair is.
 
 The offline path is the tested one, end to end:
 

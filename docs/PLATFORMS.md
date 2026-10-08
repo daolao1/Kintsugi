@@ -129,6 +129,13 @@ original is a mistake in the *request*, not a fault in the game — and the file
 there are verified byte-identical afterwards (`ensure_outside_game` in
 `crates/kintsugi/src/main.rs`).
 
+`install` is the one command that writes a game-shaped thing, and it writes it
+where the user said: `--into COPY` is refused inside the game folder like every
+other output, refused when the folder already holds anything, and the copy is
+mounted and read back afterwards so "the repair landed" is a measurement. Its
+`--script FILE` is the patch (`translate --write-script` output), never a path
+inside the game.
+
 The rule is about the folder rather than about one file, because "do not
 overwrite the script you read" still allows `--write-script game/game.snn`, an
 original that merely is not the script. So the game folder is read-only to this
